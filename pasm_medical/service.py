@@ -366,6 +366,75 @@ class MedicalService:
         }
 
 
+def register_medical_routes(svc: "MedicalService") -> int:
+    """把医疗接口挂到网关的自定义路由上，返回注册条数。
+
+    ★ 路径与 Spring Boot 的前端契约一致 —— 这样业务层是**薄薄一层转发 + 鉴权**，
+    不用把问诊树/检验单的逻辑在 Java 里再实现一遍（那就成了同源两份代码）。
+
+    ★ 网关会把这些路由一律按**管理作用域**鉴权（见 web_gateway.match_route），
+    所以 Spring Boot 必须带管理令牌来调。
+    """
+    pm = getattr(svc.app, "plugins", None)
+    gw = pm.get("web_gateway") if pm is not None else None
+    if gw is None or not hasattr(gw, "register_route"):
+        return 0
+
+    def _start(q, b):
+        return 200, svc.start_consult(
+            str(b.get("patientRef") or ""),
+            str(b.get("chiefComplaint") or ""),
+            session_key=str(b.get("sessionKey") or "current"))
+
+    def _answer(q, b):
+        return 200, svc.answer_consult(
+            str(b.get("value") or ""),
+            session_key=str(b.get("sessionKey") or "current"),
+            by_key=bool(b.get("byKey")))
+
+    def _finish(q, b):
+        return 200, svc.finish_consult(str(b.get("sessionKey") or "current"))
+
+    def _lab_parse(q, b):
+        return 200, svc.parse_lab_image(
+            str(b.get("patientRef") or ""), str(b.get("imageUrl") or ""),
+            source=str(b.get("source") or ""))
+
+    def _lab_rows(q, b):
+        rows = b.get("rows") or []
+        return 200, svc.parse_lab_rows(str(b.get("patientRef") or ""), rows,
+                                       engine=str(b.get("engine") or "manual"))
+
+    def _lab_confirm(q, b):
+        corrections = b.get("corrections") if isinstance(b.get("corrections"), dict) else {}
+        return 200, svc.confirm_lab(
+            str(b.get("reportKey") or ""), corrections=corrections,
+            all_items=bool(b.get("allItems")))
+
+    def _encounters(q, b):
+        ref = str(q.get("patientRef") or b.get("patientRef") or "")
+        return 200, {"encounters": svc.timeline(ref, k=30)}
+
+    def _critical(q, b):
+        return 200, svc.record_allergy(str(b.get("patientRef") or ""),
+                                       str(b.get("title") or ""),
+                                       str(b.get("detail") or ""))
+
+    routes = [
+        ("POST", "/api/consult/start", _start),
+        ("POST", "/api/consult/answer", _answer),
+        ("POST", "/api/consult/finish", _finish),
+        ("POST", "/api/lab/parse", _lab_parse),
+        ("POST", "/api/lab/rows", _lab_rows),
+        ("POST", "/api/lab/confirm", _lab_confirm),
+        ("GET", "/api/encounters", _encounters),
+        ("POST", "/api/critical-fact", _critical),
+    ]
+    for method, path, fn in routes:
+        gw.register_route(method, path, fn)
+    return len(routes)
+
+
 def build_service(*, tenant: str, kb_dir: str, persist_dir: str,
                   host: str = "127.0.0.1", port: int = 0,
                   token: str = "", workspace: Optional[str] = None) -> MedicalService:
@@ -396,7 +465,9 @@ def build_service(*, tenant: str, kb_dir: str, persist_dir: str,
             }},
         },
     )
-    return MedicalService(app, tenant=tenant)
+    svc = MedicalService(app, tenant=tenant)
+    register_medical_routes(svc)          # ★ 把医疗接口挂到网关
+    return svc
 
 
 def main() -> int:                                          # pragma: no cover
@@ -424,7 +495,32 @@ def main() -> int:                                          # pragma: no cover
                         host=a.host, port=a.port, token=a.token)
     print(json.dumps(svc.health(), ensure_ascii=False, indent=2))
     print("\n认知接口前缀：/api/cog/  （详见 pasm-framework 的 web_gateway 文档）")
+    print("医疗接口：/api/consult/*、/api/lab/*、/api/encounters（需管理令牌）")
     svc.app.serve()
+
+    # ★ `serve()` 是**非阻塞**的：它在守护线程里起 HTTP 服务器后立刻返回。
+    #   如果这里不挡住主线程，进程会直接退出 —— 表现是"打印了健康信息但端口从没开过"，
+    #   而且退出码是 0（看起来像正常结束），极难判断。
+    print("\n服务已启动，Ctrl+C 停止。")
+    import signal
+    import threading
+    stop = threading.Event()
+    try:
+        signal.signal(signal.SIGINT, lambda *_: stop.set())
+        signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        while not stop.is_set():
+            stop.wait(1.0)
+    except KeyboardInterrupt:                           # pragma: no cover
+        pass
+    finally:
+        print("正在关闭…")
+        try:
+            svc.app.close()
+        except Exception:                               # noqa: BLE001
+            pass
     return 0
 
 

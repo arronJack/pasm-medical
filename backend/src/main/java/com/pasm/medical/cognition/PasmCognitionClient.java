@@ -1,6 +1,7 @@
 package com.pasm.medical.cognition;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.pasm.medical.CognitionProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -34,6 +35,8 @@ import java.util.Map;
 public class PasmCognitionClient {
 
     private static final Logger log = LoggerFactory.getLogger(PasmCognitionClient.class);
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     private final RestClient http;
     private final CognitionProperties props;
@@ -148,6 +151,59 @@ public class PasmCognitionClient {
         return http.post().uri("/api/cog/consolidate")
                 .body(Map.of("agent_id", agentId(patientRef), "apply", apply))
                 .retrieve().body(JsonNode.class);
+    }
+
+    // ------------------------------------------------------------ 通用转发
+
+    /**
+     * 通用 GET（给自定义路由用，例如 ``/api/encounters``）。
+     *
+     * <p>查询参数交给 {@code UriBuilder} 编码 —— 中文参数（患者名、症状）不编码会坏，
+     * 但**手动再编码一次就是双重编码**，症状是"明明有数据却查不到"且不报错。
+     */
+    public JsonNode get(String path, Map<String, String> query) {
+        return http.get()
+                .uri(uri -> {
+                    var b = uri.path(path);
+                    if (query != null) {
+                        query.forEach((k, v) -> {
+                            if (v != null) b.queryParam(k, v);
+                        });
+                    }
+                    return b.build();
+                })
+                .retrieve().body(JsonNode.class);
+    }
+
+    /**
+     * 通用 POST（给自定义路由用）。
+     *
+     * ★ 这里**显式序列化成 JSON 字符串**再发，不用 {@code .body(Map)}：
+     *   后者依赖消息转换器链，一旦转换器选不中就会**发出一个空 body** ——
+     *   服务端收到 {@code {}}，表现为"参数莫名全空"，而且**两侧都不报错**。
+     *   本次真机上就是这样丢过一次 body（见 tools/e2e_stack.py 的注释）。
+     *   显式序列化 + 明确 Content-Type，行为可预期。
+     */
+    public JsonNode post(String path, Map<String, Object> body) {
+        String json;
+        try {
+            json = MAPPER.writeValueAsString(body == null ? Map.of() : body);
+        } catch (Exception ex) {                                   // noqa: BLE001
+            log.warn("序列化请求体失败，改发空对象：{}", ex.toString());
+            json = "{}";
+        }
+        return http.post().uri(path)
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .body(json)
+                .retrieve().body(JsonNode.class);
+    }
+
+    /** JsonNode → 普通 Java 对象，便于直接放进 Map 由 Jackson 序列化回前端。 */
+    public Object toPlain(JsonNode n) {
+        if (n == null || n.isNull()) {
+            return null;
+        }
+        return MAPPER.convertValue(n, Object.class);
     }
 
     // ------------------------------------------------------------ 内部

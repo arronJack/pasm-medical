@@ -7,12 +7,15 @@
   调用方向**单向**。前端绝不直连认知服务 —— 否则鉴权与审计就漏了。
 
   为什么现在先做单模块
-  --------------------
+  ····················
   PLAN 里规划的是多模块（medical-domain / -service / -cognition / -audit / -job）。
   落地时按依赖方向拆模块是有代价的（循环依赖、构建时间），**建议先把边界想清楚
   再拆**：等 medical-cognition（认知客户端）与 medical-audit（审计）稳定下来，
   把这两个真正会被复用/独立测试的部分提成子模块，其余保持单模块。
   过早拆模块的典型后果是"为了拆而拆"，包间调用反而比包内调用更乱。
+
+  ⚠ XML 注释里**不能出现连续两个减号**（POM 解析会直接报 Non-parseable），
+  所以上面的分隔线用中点而不是破折号。
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -33,7 +36,9 @@
   <description>医院智能诊疗辅助系统 · 业务层（Spring Boot）</description>
 
   <properties>
-    <java.version>21</java.version>
+    <!-- ★ 定为 17 而不是 21：本机实际装的是 JDK 18，且 Spring Boot 3.x 的最低要求就是 17。
+         用 `release` 语义（parent 已配好）保证编译产物不依赖更高版本的 API。 -->
+    <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
@@ -55,6 +60,13 @@
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- H2 仅用于 dev 档：让开发机**没有 PostgreSQL 也能把服务跑起来**。
+         生产用 PostgreSQL（见 application.yml），dev 档见 application-dev.yml。 -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
       <scope>runtime</scope>
     </dependency>
     <!-- Spring Security：所有 /api/** 必须鉴权；认知类接口要求更高角色 -->

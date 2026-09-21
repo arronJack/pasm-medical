@@ -118,12 +118,36 @@
 
 ### 4.1 前置
 
-| 依赖 | 版本 | 本机状态 |
+| 依赖 | 版本 | 本机实测 |
 |---|---|---|
 | Python | ≥ 3.9 | ✅ 3.13.12 |
-| Node.js | ≥ 18 | ✅ 22.22.2 |
-| JDK | 21 | ⚠️ **未安装**（`JAVA_HOME` 未正确配置，业务层跑不起来） |
-| Maven | 3.9+ | ⚠️ 未安装 |
+| Node.js | ≥ 18 | ✅ 22.22.2 + npm 10.9.7 |
+| **JDK** | **17+**（Spring Boot 3 硬要求） | ✅ **JDK 18**（`C:\Program Files\Java\jdk-18.0.1.1`） |
+| **Maven** | 3.8+ | ✅ **3.8.6**（`D:\Program Files\apache-maven-3.8.6`） |
+
+> ⚠️ **JDK 8 跑不了本项目**。Spring Boot 3.x 的最低要求是 Java 17；
+> 本机另有 JDK 8 / JRE 8，但它们只能跑旧项目，不能编译本后端。
+> `pom.xml` 里 `java.version` 定为 **17**（不是 21）就是为了匹配本机实际可用的 JDK。
+
+### 4.1.1 Maven 的两个坑（本机实测）
+
+1. **`mvn` 启动脚本处理不了带空格的安装路径**（`D:\Program Files\...`）。
+   直接 `mvn` 会报 `找不到或无法加载主类 org.codehaus.plexus.classworlds.launcher.Launcher`。
+   **解法**：绕过脚本，直接让 Java 加载 Maven 的 launcher（等价且稳定）：
+
+   ```bash
+   export JAVA_HOME='C:\Program Files\Java\jdk-18.0.1.1'
+   M='C:\Users\xiaozhi\AppData\Local\Temp\maven386'   # 见下面第 2 条
+   java -classpath "$M\boot\plexus-classworlds-2.6.0.jar" \
+        "-Dclassworlds.conf=$M\bin\m2.conf" "-Dmaven.home=$M" \
+        "-Dmaven.multiModuleProjectDirectory=<项目路径>" \
+        org.codehaus.plexus.classworlds.launcher.Launcher -DskipTests package
+   ```
+
+2. **给 java 的路径要用 Windows 形式**（`C:\...`）。在 Git Bash 里用 `/c/...`
+   会被 MSYS 做路径转换，classpath 直接失效。
+   （若不想每次写这一长串，可把 Maven 复制到无空格目录，例如
+   `C:\Users\xiaozhi\AppData\Local\Temp\maven386`。）
 
 ### 4.2 启动认知服务（**已验证可跑**）
 
@@ -153,15 +177,36 @@ npm run build        # 产物在 web/dist/
 
 `vite.config.ts` 已把 `/api` 代理到 `http://127.0.0.1:8081`（业务层）。
 
-### 4.4 启动业务层（**未验证**，本机无 JDK）
+### 4.4 启动业务层（**已验证可编译、可启动、可联调**）
 
 ```bash
 cd backend
-export MEDICAL_DB_PASSWORD=...         # 见 application.yml
-export PASM_COGNITION_URL=http://127.0.0.1:8090
-export PASM_COGNITION_TOKEN=...        # 与认知服务同一个管理令牌
-mvn spring-boot:run                    # http://127.0.0.1:8081
+
+# 开发档：用 H2 内存库，**不需要任何外部数据库**就能跑起来
+# （打包后用 java -jar 也行，见 tools/e2e_stack.py 的做法）
+java -jar target/pasm-medical-backend-0.1.0.jar \
+  --spring.profiles.active=dev \
+  --server.port=8081 \
+  --pasm.cognition.base-url=http://127.0.0.1:8090 \
+  --pasm.cognition.token=<与认知服务同一个管理令牌>
 ```
+
+演示账号（**仅开发档**）：`patient / 123456`、`staff / 123456`。
+生产必须接医院统一身份（OIDC/OAuth2），见 `config/TokenService.java` 的注释。
+
+### 4.5 三端联调（**一键验证整条链路**）
+
+```bash
+# 前置：后端已打包
+cd backend && mvn -DskipTests package
+
+# 真起两个服务、走真实 HTTP、跑完自动清理
+python tools/e2e_stack.py
+```
+
+它会验证：认知服务健康 → 业务层健康 → **未登录 401** → 登录 → **薄转发到问诊树
+（胸痛首问必须是「放射」）** → **红旗中断** → 检验单待确认 → 时间轴。
+**10 项全过**代表三端真的接上了。
 
 ---
 
