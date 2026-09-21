@@ -119,6 +119,20 @@ python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被�
 > 唯一要放弃的是"AI 自己读片下结论"——换成"归档 + 接已有资质厂商 + 结构化转交"，
 > 临床价值几乎不损失，风险降一个量级。
 
-## 许可
+## 开源与许可
 
-MIT
+本项目为**开源公开仓库**（MIT）：
+
+- Gitee：https://gitee.com/arronzheng/pasm-medical
+- GitHub：https://github.com/arronJack/pasm-medical
+
+许可见 [LICENSE](LICENSE)（MIT）。
+
+> ⚠️ **许可范围提示**：MIT 覆盖的是**代码**。但把这个系统用于实际诊疗场景，
+> 涉及的是**医疗器械合规**（见 [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md) §2）——
+> 代码开源不等于可以合法用于临床诊断。尤其是**影像自动诊断**那一项，
+> 本仓库**没有**也不打算实现（不建议自研，需三类医疗器械注册证）。
+>
+> 仓库内 `pasm_medical/safety.py` 的规则表（十八反 / 十九畏 / 妊娠禁忌 / 毒性剂量）
+> 是药典与教材的经典内容，用于**演示与初版落地**，**未经临床药师复核**。
+> 投产前必须逐条复核并与本机构前置审核规则对齐。
