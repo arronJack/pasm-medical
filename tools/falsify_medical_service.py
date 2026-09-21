@@ -27,6 +27,7 @@ REPO = HERE.parent
 DOMAIN = REPO / "pasm_medical" / "domain.py"
 SERVICE = REPO / "pasm_medical" / "service.py"
 CONSULT = REPO / "pasm_medical" / "consult.py"
+LAB = REPO / "pasm_medical" / "lab.py"
 
 #: (要验的断言名, 目标文件, 原文锚点, 改坏后的文本)
 CASES = [
@@ -40,6 +41,12 @@ CASES = [
     ("胸痛+放射痛 → 判红旗", CONSULT,
      '        when=lambda f: f.get("主诉") == "胸痛" and (',
      '        when=lambda f: False and f.get("主诉") == "胸痛" and ('),
+    # ★ 检验单：把"未确认不得入记忆"这道闸门拆掉，必须被抓。
+    #   这是整个 OCR 流程里最要命的一条 —— 拆了它，识别错误就直接进病历。
+    #   锚点刻意用**单行**：多行锚点一旦转义写错就静默不命中（本次就踩了）。
+    ("★ 未确认项拒绝入记忆", LAB,
+     '            raise ValueError("未确认的检验项不得入记忆：%s（先调 confirm）" % self.name)',
+     '            pass  # 反例：拆掉确认闸门'),
     # ★ 主诉识别：改成"识别不出就硬猜一个"，必须被抓。
     #   为什么用这个反例：它直接模拟最危险的行为 —— **猜错方向**。
     #   （先前试过"把单字也当证据"，但那种输入的字串长度让单字压根不在词元里，
@@ -57,6 +64,7 @@ def run():
     env["PYTHONPATH"] = os.pathsep.join(extra + [env.get("PYTHONPATH", "")])
     out = ""
     for args in ([sys.executable, "-m", "pasm_medical.consult"],
+                 [sys.executable, "-m", "pasm_medical.lab"],
                  [sys.executable, str(HERE / "e2e_medical_service.py")]):
         p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", env=env, cwd=str(REPO))
@@ -68,7 +76,7 @@ def run():
 
 def main() -> int:
     originals = {f: io.open(f, encoding="utf-8", newline="").read()
-                 for f in {DOMAIN, SERVICE, CONSULT}}
+                 for f in {DOMAIN, SERVICE, CONSULT, LAB}}
 
     out, rc = run()
     if rc != 0 or "0 项失败" not in out:

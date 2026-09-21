@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import safety
+from . import lab
 from .consult import ConsultEngine, ConsultSession
+from .lab import LabReport, OcrEngine
 from .domain import (Encounter, agent_id_for, allergy_memory, critical_memory,
                      scrub_identifiers)
 
@@ -49,6 +51,10 @@ class MedicalService:
         self.engine = consult_engine or ConsultEngine()
         #: ★ 进行中的问诊（进程内）。生产须落 Redis/DB —— 多实例下进程内状态会丢。
         self._consults: Dict[str, ConsultSession] = {}
+        #: 待确认的检验单：report_key → (patient_ref, LabReport)
+        self._lab_reports: Dict[str, Any] = {}
+        #: OCR 引擎（不配置时检验单功能不可用，但服务照常启动）
+        self.ocr: Optional[Any] = None
 
     # ---------------------------------------------------------- 内部
 
@@ -197,6 +203,58 @@ class MedicalService:
         """
         got = self.recall(patient_ref, "就诊 主诉 判断 处置", k=k)
         return [h for h in (got.get("hits") or []) if "就诊" in (h.get("title") or "")]
+
+    # ---------------------------------------------------------- 检验单（OCR → 确认 → 入记忆）
+
+    def parse_lab_image(self, patient_ref: str, image_path: str, *,
+                        ocr: Optional["OcrEngine"] = None,
+                        source: str = "") -> Dict[str, Any]:
+        """识别检验单并返回**待确认**的结构化结果。
+
+        ★ 关键：本方法**只识别、不入库**。返回值里 ``needs_confirmation=True``，
+        必须由前端回显给患者/护士核对后调 :meth:`confirm_lab` 才写进病历。
+        理由：13.5 识别成 18.5，在别的场景是 bug，在这里是事故。
+        """
+        eng = ocr or self.ocr
+        if eng is None or not eng.available():
+            return {"ok": False, "error": "OCR 未配置",
+                    "hint": "在后台「对接设置」里配置化验单 OCR，或改为 LIS 直连"}
+        rows = eng.rows(image_path)
+        rep = lab.parse_rows(rows, engine=eng.name, source=source or image_path)
+        key = "%s:lab" % patient_ref
+        self._lab_reports[key] = (patient_ref, rep)
+        d = rep.to_dict()
+        d.update({"ok": True, "report_key": key})
+        return d
+
+    def parse_lab_rows(self, patient_ref: str, rows: List[List[str]], *,
+                       engine: str = "manual", source: str = "") -> Dict[str, Any]:
+        """直接吃结构化行（LIS 直连 或 人工录入 走这条，绕开 OCR）。"""
+        rep = lab.parse_rows(rows, engine=engine, source=source)
+        key = "%s:lab" % patient_ref
+        self._lab_reports[key] = (patient_ref, rep)
+        d = rep.to_dict()
+        d.update({"ok": True, "report_key": key})
+        return d
+
+    def confirm_lab(self, report_key: str, *,
+                    corrections: Optional[Dict[str, float]] = None,
+                    all_items: bool = False) -> Dict[str, Any]:
+        """回显确认 —— **确认之后才允许入记忆**。"""
+        got = self._lab_reports.get(report_key)
+        if got is None:
+            return {"ok": False, "error": "找不到该检验单，请先识别"}
+        patient_ref, rep = got
+        r = rep.confirm(corrections, all_items=all_items)
+        mems = rep.to_memories()
+        written = 0
+        for m in mems:
+            if self.observe_note(patient_ref, m["title"], m["brief"],
+                                 m["salience"]).get("ok"):
+                written += 1
+        return {"ok": True, "confirm": r, "written": written,
+                "critical": rep.critival_summary(),
+                "report": rep.to_dict()}
 
     # ---------------------------------------------------------- 预问诊（问诊树）
 
