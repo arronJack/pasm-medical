@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 认知服务运行时落点（**含患者记忆，绝不能入库**）
+.pasm-medical/
+*.jsonl
+agent_state.json
+cognition_index.json
+cognition_rehearsal.json
+
+# 令牌
+*.token
+.env
+.env.*
+
+# 后端
+backend/target/
+*.class
+
+# 前端
+web/node_modules/
+web/dist/
+web/.vite/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  医院智能诊疗辅助系统 —— 后端（Spring Boot 3 / Java 21）
+
+  分层原则（见 ../docs/PLAN.md §2）：
+    Vue  →  Spring Boot  →  Python 认知服务（PASM）
+  调用方向**单向**。前端绝不直连认知服务 —— 否则鉴权与审计就漏了。
+
+  为什么现在先做单模块
+  --------------------
+  PLAN 里规划的是多模块（medical-domain / -service / -cognition / -audit / -job）。
+  落地时按依赖方向拆模块是有代价的（循环依赖、构建时间），**建议先把边界想清楚
+  再拆**：等 medical-cognition（认知客户端）与 medical-audit（审计）稳定下来，
+  把这两个真正会被复用/独立测试的部分提成子模块，其余保持单模块。
+  过早拆模块的典型后果是"为了拆而拆"，包间调用反而比包内调用更乱。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.5</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.pasm</groupId>
+  <artifactId>pasm-medical-backend</artifactId>
+  <version>0.1.0</version>
+  <name>pasm-medical-backend</name>
+  <description>医院智能诊疗辅助系统 · 业务层（Spring Boot）</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <!-- 审计要求"不可变 + 独立库"，先用 JPA 起步；生产建议换成 append-only 的
+         审计专用存储（如 WORM 对象存储 / 独立审计库），并收回 UPDATE/DELETE 权限。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- Spring Security：所有 /api/** 必须鉴权；认知类接口要求更高角色 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

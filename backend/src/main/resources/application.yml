@@ -1,0 +1,60 @@
+# 医院智能诊疗辅助系统 · 后端配置
+#
+# ⚠️ 认知服务令牌是**管理令牌**：认知接口能写记忆、改人格、触发巩固。
+#    绝不要把它写进前端构建产物，也不要提交到仓库。
+#    生产请从环境变量注入（下面用 ${...} 占位）。
+server:
+  port: 8081
+  shutdown: graceful
+
+spring:
+  application:
+    name: pasm-medical-backend
+
+  datasource:
+    # PostgreSQL（不是 MySQL）：需要 JSONB 存非结构化病历、pgvector 做向量检索、
+    # 窗口函数做时序分析。若对接院内既有 HIS/EMR 用的是 MySQL/达梦，需先评估。
+    url: ${MEDICAL_DB_URL:jdbc:postgresql://127.0.0.1:5432/pasm_medical}
+    username: ${MEDICAL_DB_USER:pasm_medical}
+    password: ${MEDICAL_DB_PASSWORD:}
+  jpa:
+    hibernate:
+      # 生产必须是 validate/none —— 医疗系统的表结构变更要走评审与变更单，
+      # 绝不能让 ORM 自动改表。
+      ddl-auto: validate
+    open-in-view: false      # 关掉：避免把 DB 连接绑到视图渲染期
+
+  jackson:
+    default-property-inclusion: non_null
+
+# ── 认知服务（Python / PASM）────────────────────────────────────────────
+pasm:
+  cognition:
+    base-url: ${PASM_COGNITION_URL:http://127.0.0.1:8090}
+    # 管理令牌：从环境变量注入，勿入库、勿下发前端
+    token: ${PASM_COGNITION_TOKEN:}
+    timeout-seconds: 20
+
+# ── 审计 ───────────────────────────────────────────────────────────────
+medical:
+  audit:
+    # 每次认知调用都要留痕：入参快照 / 召回条目 / 模型版本 / 操作者 / 时间。
+    # 生产建议落到**独立库**且只授予 INSERT（append-only），与业务库物理隔离。
+    enabled: true
+    store: db
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # 生产只暴露 health/info；metrics 走内网或鉴权后
+        include: health,info
+  endpoint:
+    health:
+      show-details: when_authorized
+
+logging:
+  level:
+    com.pasm.medical: INFO
+    # 认知调用链路的调试日志：排查"为什么没召回"时打开
+    com.pasm.medical.cognition: INFO
