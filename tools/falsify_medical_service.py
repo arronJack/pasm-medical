@@ -26,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 DOMAIN = REPO / "pasm_medical" / "domain.py"
 SERVICE = REPO / "pasm_medical" / "service.py"
+CONSULT = REPO / "pasm_medical" / "consult.py"
 
 #: (要验的断言名, 目标文件, 原文锚点, 改坏后的文本)
 CASES = [
@@ -35,6 +36,17 @@ CASES = [
     ("无依据时必须拒答（不编造）", SERVICE,
      "            keep = relevance.select_evidence(question, raw, limit=k)",
      "            keep = list(raw)      # 反例：不过闸门 → 弱命中被当成依据"),
+    # ★ 红旗：把"胸痛+放射痛"这条规则废掉，必须被抓住
+    ("胸痛+放射痛 → 判红旗", CONSULT,
+     '        when=lambda f: f.get("主诉") == "胸痛" and (',
+     '        when=lambda f: False and f.get("主诉") == "胸痛" and ('),
+    # ★ 主诉识别：改成"识别不出就硬猜一个"，必须被抓。
+    #   为什么用这个反例：它直接模拟最危险的行为 —— **猜错方向**。
+    #   （先前试过"把单字也当证据"，但那种输入的字串长度让单字压根不在词元里，
+    #     改动实际不生效 → 反例本身无效。**反例也要能真的走到那条分支**。）
+    ("识别不出时返回 None（不硬猜）：'我就是不太舒服'", CONSULT,
+     "        return best if best_n >= 1 else None",
+     '        return best or "胸痛"   # 反例：识别不出就硬猜一个'),
 ]
 
 
@@ -43,15 +55,20 @@ def run():
     extra = [str(REPO), str(REPO.parent / "pasm-skills"),
              str(REPO.parent / "pasm-framework")]
     env["PYTHONPATH"] = os.pathsep.join(extra + [env.get("PYTHONPATH", "")])
-    p = subprocess.run([sys.executable, str(HERE / "e2e_medical_service.py")],
-                       capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", env=env, cwd=str(REPO))
-    return (p.stdout or "") + (p.stderr or ""), p.returncode
+    out = ""
+    for args in ([sys.executable, "-m", "pasm_medical.consult"],
+                 [sys.executable, str(HERE / "e2e_medical_service.py")]):
+        p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, cwd=str(REPO))
+        out += (p.stdout or "") + (p.stderr or "")
+        if p.returncode != 0:
+            out += "\n[rc=%d]\n" % p.returncode
+    return out, (0 if "0 项失败" in out and "[rc=" not in out else 1)
 
 
 def main() -> int:
     originals = {f: io.open(f, encoding="utf-8", newline="").read()
-                 for f in {DOMAIN, SERVICE}}
+                 for f in {DOMAIN, SERVICE, CONSULT}}
 
     out, rc = run()
     if rc != 0 or "0 项失败" not in out:

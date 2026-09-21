@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import safety
+from .consult import ConsultEngine, ConsultSession
 from .domain import (Encounter, agent_id_for, allergy_memory, critical_memory,
                      scrub_identifiers)
 
@@ -41,9 +42,13 @@ class MedicalService:
     每个租户一个实例；租户内**每个患者一个认知 agent**。
     """
 
-    def __init__(self, app: Any, *, tenant: str) -> None:
+    def __init__(self, app: Any, *, tenant: str,
+                 consult_engine: Optional[ConsultEngine] = None) -> None:
         self.app = app
         self.tenant = tenant
+        self.engine = consult_engine or ConsultEngine()
+        #: ★ 进行中的问诊（进程内）。生产须落 Redis/DB —— 多实例下进程内状态会丢。
+        self._consults: Dict[str, ConsultSession] = {}
 
     # ---------------------------------------------------------- 内部
 
@@ -192,6 +197,76 @@ class MedicalService:
         """
         got = self.recall(patient_ref, "就诊 主诉 判断 处置", k=k)
         return [h for h in (got.get("hits") or []) if "就诊" in (h.get("title") or "")]
+
+    # ---------------------------------------------------------- 预问诊（问诊树）
+
+    def start_consult(self, patient_ref: str, chief_complaint: str = "",
+                      session_key: str = "") -> Dict[str, Any]:
+        """开一次预问诊。返回首个问题（或红十字直接建议就医）。
+
+        ★ 问诊状态**进程内保存**（``self._consults``）—— 这是 P1 的第一版。
+        生产必须落到 Redis/DB：多实例部署下进程内状态会丢，患者刷新就断线。
+        """
+        s = ConsultSession(self.engine, patient_ref=patient_ref)
+        key = session_key or patient_ref
+        if chief_complaint:
+            r = s.set_chief_complaint(chief_complaint)
+            if not r.get("ok"):
+                return r                       # 识别不出 → 让前端出主诉选择
+        self._consults[key] = s
+        return self._consult_state(s)
+
+    def answer_consult(self, text_or_key: str, value: str = "",
+                       session_key: str = "", *, by_key: bool = False) -> Dict[str, Any]:
+        """回答当前问题。``by_key=True`` 时第一个参数是问题 key。"""
+        key = session_key or text_or_key if by_key else session_key
+        s = self._consults.get(session_key)
+        if s is None:
+            return {"ok": False, "error": "没有进行中的问诊，请先调用 start_consult"}
+        if by_key:
+            r = s.answer(text_or_key, value)
+        else:
+            r = s.answer_current(text_or_key)
+        out = self._consult_state(s)
+        out["answer_result"] = r
+        # ★ 主诉与红旗事件写入认知记忆：复诊时不必重问（这就是记忆的价值）
+        if r.get("halted"):
+            self.record_rule_violation(patient_ref=s.patient_ref,
+                                       detail="预问诊命中警示信号：" +
+                                              "；".join(x["label"] for x in r["red_flags"]),
+                                       involved=[x["id"] for x in r["red_flags"]])
+        return out
+
+    def finish_consult(self, session_key: str) -> Dict[str, Any]:
+        """结束问诊，产出《预问诊摘要》并写入认知记忆。"""
+        s = self._consults.get(session_key)
+        if s is None:
+            return {"ok": False, "error": "没有进行中的问诊"}
+        sm = s.summary()
+        # 摘要入认知层：主诉 + 关键事实（过敏史 salience=5，绝不能被闲聊挤掉）
+        if s.facts.get("过敏史"):
+            self.record_allergy(s.patient_ref, str(s.facts["过敏史"]), "预问诊采集")
+        if s.chief_complaint:
+            self.observe_note(s.patient_ref, "预问诊·%s" % s.chief_complaint,
+                              "；".join("%s：%s" % (k, v)
+                                        for k, v in list(s.facts.items())[:8]), 4)
+        self._consults.pop(session_key, None)
+        return {"ok": True, **sm}
+
+    def _consult_state(self, s: "ConsultSession") -> Dict[str, Any]:
+        q = s.next_question()
+        return {"ok": True, "halted": s.halted, "red_flags": s.red_flags_hit,
+                "coverage": s.coverage(),
+                "question": (q.to_dict() if q else None),
+                "triage": s.triage() if s.halted else None}
+
+    def observe_note(self, patient_ref: str, title: str, brief: str,
+                     salience: int = 3) -> Dict[str, Any]:
+        caps = self._caps()
+        if caps is None:
+            return {"ok": False, "error": "认知层不可用"}
+        return caps.observe(self._agent(patient_ref), title=title, brief=brief,
+                            tags=[], salience=salience)
 
     # ---------------------------------------------------------- 确定性规则
 
