@@ -166,18 +166,52 @@
 
 ```bash
 # 安装依赖（基座 + 应用框架）
+# ★ pasm-framework 必须 >=0.5.3 —— 0.5.2 缺 register_route，装上会「启动即拒」
 pip install "pasm-skills>=0.6.2" "pasm-framework>=0.5.3"
 pip install -e .
+```
 
-# 起服务（管理令牌务必设置，认知接口全靠它）
+**★ 先选终端**：`export` / `$(...)` 是 **bash** 语法。在 Windows PowerShell 里照抄会报
+`无法将"export"项识别为 cmdlet、函数、脚本文件或可运行程序的名称` —— 那不是装错了，是**终端不对**。
+下面三段是同一件事的三套写法，**按你的终端选一段**：
+
+**① Git Bash / WSL / macOS / Linux**
+```bash
 export PASM_MEDICAL_TOKEN="$(python -c 'import secrets;print(secrets.token_urlsafe(24))')"
 python -m pasm_medical.service --tenant demo --port 8090
+```
 
-# 探活
+**② Windows PowerShell**（5.1 / 7 均可；注意 5.1 不支持 `&&`）
+```powershell
+$env:PASM_MEDICAL_TOKEN = (python -c "import secrets;print(secrets.token_urlsafe(24))")
+python -m pasm_medical.service --tenant demo --port 8090
+```
+
+**③ Windows CMD**
+```bat
+for /f "delims=" %T in ('python -c "import secrets;print(secrets.token_urlsafe(24))"') do set PASM_MEDICAL_TOKEN=%T
+python -m pasm_medical.service --tenant demo --port 8090
+```
+
+> 嫌麻烦也可以直接给 `--token` 传字面值（仅本机联调；生产走密钥管理注入，不入库不入镜像）：
+> `python -m pasm_medical.service --tenant demo --port 8090 --token dev-only-token`
+
+**探活**
+```bash
 curl -s http://127.0.0.1:8090/healthz
 curl -s -H "Authorization: Bearer $PASM_MEDICAL_TOKEN" \
      http://127.0.0.1:8090/api/cog/capabilities
 ```
+
+> ★ **PowerShell 里 `curl` 是 `Invoke-WebRequest` 的别名**，`-H` / `-d` / `-s` 语义完全不同
+> （常见症状：`-H` 报「找不到与参数名称"H"匹配的参数」）。PowerShell 里**必须写 `curl.exe`**：
+> ```powershell
+> curl.exe -s http://127.0.0.1:8090/healthz
+> curl.exe -s -H "Authorization: Bearer $env:PASM_MEDICAL_TOKEN" http://127.0.0.1:8090/api/cog/capabilities
+> ```
+
+★ **`/healthz` 看 `custom_routes`**：必须 **> 0**（正常 9 条医疗路由）。`healthy` 只是插件级状态，
+**路由挂没挂它看不出来** —— 医疗接口全 404 时它照样报 `healthy`（2026-09-22 踩过，见 §10 分发形态）。
 
 ### 4.3 启动前端（**已验证可构建**）
 
