@@ -384,8 +384,13 @@ class MedicalService:
             err = "网关未挂载认知接口（web_gateway 未启用，或 cognitive=false）"
         elif caps is None:
             err = getattr(api, "error", None) and api.error() or "认知层未就绪"
+        _ri = getattr(gw, "routes_info", None)
         return {
             "tenant": self.tenant,
+            # ★ 应用侧注册的自定义路由（= 医疗接口）。**0 条就是"没挂上"的信号** ——
+            #   与 pasm-framework 侧 /healthz 的 custom_routes 是同一个数，
+            #   故意两处都暴露：业务层只跟本服务说话，未必会去看网关的 /healthz。
+            "custom_routes": (_ri() if callable(_ri) else None),
             "cognitive_available": caps is not None,
             "cognitive_error": err,
             "operations": (caps.operations() if caps is not None else []),
@@ -406,8 +411,20 @@ def register_medical_routes(svc: "MedicalService") -> int:
     """
     pm = getattr(svc.app, "plugins", None)
     gw = pm.get("web_gateway") if pm is not None else None
-    if gw is None or not hasattr(gw, "register_route"):
-        return 0
+    # ★★ 这里**必须硬失败**，不能静默 return 0。
+    #   历史事故：`register_route` 曾经只存在于 pasm-framework 的**未提交工作区**，
+    #   于是 pip 装出来的包"医疗接口全 404"，而服务照报 healthy、
+    #   管理台照常能聊 —— **零提示**。返回 0 会让这种包一路绿灯发出去。
+    if gw is None:
+        raise RuntimeError(
+            "web_gateway 插件未启用，医疗接口无法挂载"
+            "（backend_config 里需要 web_gateway.enabled=true，见 build_service）")
+    if not hasattr(gw, "register_route"):
+        raise RuntimeError(
+            "当前 pasm-framework 不支持 register_route —— 装的版本 < 0.5.3。"
+            "这类包\"装得上但医疗接口全 404\"，且网关照报 healthy、管理台照常能聊，"
+            "零提示，所以这里直接失败而不是继续跑。"
+            "修复：pip install -U \"pasm-framework>=0.5.3\"")
 
     def _start(q, b):
         return 200, svc.start_consult(
@@ -466,6 +483,13 @@ def register_medical_routes(svc: "MedicalService") -> int:
     ]
     for method, path, fn in routes:
         gw.register_route(method, path, fn)
+    # ★ 注册完立刻回读一次：确认每条都**真能被匹配到**，而不是"注册了个寂寞"。
+    #   这条与 framework 侧 /healthz 的 custom_routes 互补 ——
+    #   那边证明"注册了几条"，这边证明"注册的确实生效"。
+    unbound = ["%s %s" % (m, p) for m, p, _ in routes
+               if gw.match_route(m, p) is None]
+    if unbound:
+        raise RuntimeError("医疗接口注册后无法匹配（框架行为异常）：%s" % unbound)
     return len(routes)
 
 

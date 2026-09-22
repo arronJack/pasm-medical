@@ -16,7 +16,7 @@ classifiers = [
     "Intended Audience :: Healthcare Industry",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
-dependencies = ["pasm-skills>=0.6.2", "pasm-framework>=0.5.2"]
+dependencies = ["pasm-skills>=0.6.2", "pasm-framework>=0.5.3"]
 
 [project.urls]
 Homepage = "https://gitee.com/arronzheng/pasm-medical"
