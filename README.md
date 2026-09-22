@@ -90,6 +90,8 @@ pip install -e .
 PASM_MEDICAL_TOKEN=<管理令牌> python -m pasm_medical.service --port 8090
 
 # 2) Spring Boot 后端（dev 档 = H2 内存库 + 演示账号，无需外部数据库）
+#    ★ 需 JDK 17+：先 `mvn -version` 确认打出来的是 17.x。JAVA_HOME 未设时 Maven 会
+#      静默用本机 JDK 8，报一堆看着像源码坏了的语法错（见 docs/GUIDE.md §4.1）
 cd backend && mvn spring-boot:run -Dspring-boot.run.profiles=dev   # http://127.0.0.1:8081
 #    演示账号（仅 dev）：staff / 123456（后台）、patient / 123456
 #    注意：非 dev 档演示账号默认关闭，且需要 PostgreSQL

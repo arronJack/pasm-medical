@@ -135,18 +135,77 @@
 |---|---|---|
 | Python | ≥ 3.9 | ✅ 3.13.12 |
 | Node.js | ≥ 18 | ✅ 22.22.2 + npm 10.9.7 |
-| **JDK** | **17+**（Spring Boot 3 硬要求） | ✅ **JDK 18**（`C:\Program Files\Java\jdk-18.0.1.1`） |
+| **JDK** | **17+**（Spring Boot 3 硬要求） | ✅ **JDK 17**（`D:\Program Files\Java\jdk-17`，编后端 / 跑服务）<br>✅ **JDK 18**（`C:\Program Files\Java\jdk-18.0.1.1`，跑 `tools/e2e_stack.py`） |
 | **Maven** | 3.8+ | ✅ **3.8.6**（`D:\Program Files\apache-maven-3.8.6`） |
 
 > ⚠️ **JDK 8 跑不了本项目**。Spring Boot 3.x 的最低要求是 Java 17；
-> 本机另有 JDK 8 / JRE 8，但它们只能跑旧项目，不能编译本后端。
+> 本机另有 JDK 8 / JRE 8 / JDK 12，但它们只能跑旧项目，不能编译本后端。
 > `pom.xml` 里 `java.version` 定为 **17**（不是 21）就是为了匹配本机实际可用的 JDK。
+
+#### ★★ 不设 `JAVA_HOME` 会「静默」用 JDK 8（2026-09-22 实测踩到，先看这段）
+
+`JAVA_HOME` 为空时 Maven 回落到 PATH 上第一个 `java`；本机那是 Oracle 的转发目录
+`C:\Program Files (x86)\Common Files\Oracle\Java\javapath\java.exe` → 实为 **`jre1.8.0_221`**。
+而 maven-compiler-plugin 会**静默忽略** `release 17`（**连一条 WARNING 都没有**），
+javac 8 就按默认源级 8 解析，**只在用了新语言特性的那几行报语法错** —— 看起来像源码写坏了：
+
+```
+[ERROR] .../service/SystemConfigService.java:[54,9]  非法的表达式开始   ← public record Settings(…) 被当成"返回 record 类型的方法"
+[ERROR] .../service/SystemConfigService.java:[54,41] 需要';'
+[ERROR] .../web/AdminController.java:[183,47]        需要')'            ← x instanceof Map<?,?> mm 模式匹配（Java 16+）不识别
+[ERROR] .../web/AdminController.java:[183,48]        不是语句
+[ERROR] .../web/AdminController.java:[183,50]        需要';'
+```
+
+**判据**：报错集中在 `record` / `instanceof <类型> <变量>` 这类**新语言特性**上时，
+**先跑 `mvn -version` 看 `Java version`**，**不要去改源码**（改了才是真坏）。
+同一份源码、同一个 pom，只换 Maven 所用的 JDK：
+
+| Maven 运行在 | 结果 |
+|---|---|
+| JDK 8（`jre1.8.0_221`） | 上述 5 条语法错 + `BUILD FAILURE` |
+| JDK 12（本机 `D:\Program Files\Java\jdk-12.0.2`） | 57 条语法错（同样不行） |
+| **JDK 17** | **`BUILD SUCCESS`**，产物字节码 `major=61` |
+
+**设置（按终端选一段；`JAVA_HOME` 必须置于 PATH 最前，否则 javapath 仍抢先）**
+
+```bash
+# ① Git Bash
+export JAVA_HOME="D:/Program Files/Java/jdk-17"
+export PATH="$JAVA_HOME/bin:$PATH"
+mvn -version          # ★ 必须显示 Java version: 17.x
+```
+
+```powershell
+# ② Windows PowerShell
+$env:JAVA_HOME = "D:\Program Files\Java\jdk-17"
+$env:PATH = "$env:JAVA_HOME\bin;" + $env:PATH
+mvn -version          # ★ 必须显示 Java version: 17.x
+```
+
+```bat
+:: ③ Windows CMD
+set JAVA_HOME=D:\Program Files\Java\jdk-17
+set PATH=%JAVA_HOME%\bin;%PATH%
+mvn -version          :: ★ 必须显示 Java version: 17.x
+```
 
 ### 4.1.1 Maven 的两个坑（本机实测）
 
 1. **`mvn` 启动脚本处理不了带空格的安装路径**（`D:\Program Files\...`）。
    直接 `mvn` 会报 `找不到或无法加载主类 org.codehaus.plexus.classworlds.launcher.Launcher`。
-   **解法**：绕过脚本，直接让 Java 加载 Maven 的 launcher（等价且稳定）：
+   **首选解法**：改用同目录的 **`mvn.cmd`**（绕开那个处理不了空格的 shell 脚本），并显式给 `JAVA_HOME`：
+
+   ```bash
+   # Git Bash（★ 先跑 mvn -version，确认 Java version 是 17.x）
+   export JAVA_HOME="D:/Program Files/Java/jdk-17"
+   export PATH="$JAVA_HOME/bin:/d/Program Files/apache-maven-3.8.6/bin:$PATH"
+   "/d/Program Files/apache-maven-3.8.6/bin/mvn.cmd" -DskipTests package
+   ```
+   > 2026-09-22 实测：**同一条 `mvn.cmd` 命令**，`JAVA_HOME` 指 JDK 17 → `BUILD SUCCESS`；
+   > 指 JDK 8 → §4.1 那 5 条语法错。
+
+   **兜底解法**：绕过脚本，直接让 Java 加载 Maven 的 launcher（等价且稳定）：
 
    ```bash
    export JAVA_HOME='C:\Program Files\Java\jdk-18.0.1.1'
@@ -226,6 +285,8 @@ npm run build        # 产物在 web/dist/
 
 ### 4.4 启动业务层（**已验证可编译、可启动、可联调**）
 
+> ★ 编译/运行需 **JDK 17+**：先 `mvn -version` 确认（见 §4.1）；打包用 `mvn -DskipTests package`。
+
 ```bash
 cd backend
 
@@ -244,7 +305,7 @@ java -jar target/pasm-medical-backend-0.1.0.jar \
 ### 4.5 三端联调（**一键验证整条链路**）
 
 ```bash
-# 前置：后端已打包
+# 前置：后端已打包（★ 需 JDK 17+，先 mvn -version 自检；见 §4.1）
 cd backend && mvn -DskipTests package
 
 # 真起两个服务、走真实 HTTP、跑完自动清理
