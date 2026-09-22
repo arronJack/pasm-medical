@@ -299,8 +299,39 @@ java -jar target/pasm-medical-backend-0.1.0.jar \
   --pasm.cognition.token=<与认知服务同一个管理令牌>
 ```
 
-演示账号（**仅开发档**）：`patient / 123456`、`staff / 123456`。
-生产必须接医院统一身份（OIDC/OAuth2），见 `config/TokenService.java` 的注释。
+#### 4.4.1 测试账号（**仅开发档**）
+
+`application-dev.yml` 显式打开 `demo-login-enabled: true` 时可用：
+
+| 角色 | 账号 | 密码 | 登录后落地页 | 用途 |
+|---|---|---|---|---|
+| 医护人员 | `staff` | `123456` | `/#/admin` | 患者列表 / 就诊时间轴 / 统计 / AI 审计 / 对接设置（改大模型、OCR 指向） |
+| 患者 | `patient` | `123456` | `/#/consult` | 预问诊、检验单回显确认、历史就诊；数据由 `bootstrap/DemoDataSeeder` 灌入 |
+
+登录页 `http://127.0.0.1:5173/#/login`。**`npm run dev` 时页面上直接显示这两个账号，点一下自动填入**
+（实现见 `web/src/views/LoginView.vue` 的 `DEMO_HINT` 门控）；`npm run build` 的生产产物里
+**既不含该提示、也不含 `123456` 字样**。
+
+> ★ **坑：模板里的 `v-if` 只挡「渲染」，挡不住字面量。** 最初写成
+> `<p v-if="isDev">医护人员 staff / 123456</p>`，运行时确实不显示，但
+> `grep -r 123456 web/dist` → **3 处命中**：字符串照样进 render 函数（`v-if` 编译成运行时三元）。
+> 正确写法是把**标题与条目一起**放进脚本层常量：`import.meta.env.DEV ? {...} : { title:'', items:[] }`
+> —— `vite build` 会把条件折叠成 `false`，整段字面量被摇掉。
+>
+> **验证（正反都要）**：
+> ```bash
+> grep -r 123456 web/dist | wc -l                              # 生产：必须 0
+> NODE_ENV=development <vite> build --outDir dist-devcheck     # 正例对照：必须 >0（3 处）
+> ```
+> 注意 `vite build --mode development` **不能**让 `DEV=true`（build 时 `NODE_ENV` 仍是 production），
+> 必须显式 `NODE_ENV=development` —— 否则正例对照恒为 0，看着"通过了"其实只是没测到。
+
+两条**反例断言**（在 `tools/e2e_stack.py` 里，改鉴权时别让它们变绿）：
+
+- 患者令牌访问 `/api/admin/**` 必须 **403**；
+- `--medical.auth.demo-login-enabled=false` 时，这两个账号必须**登不进去**。
+
+生产必须接医院统一身份（OIDC/OAuth2），见 `config/TokenService.java` 的注释与 §5.2。
 
 ### 4.5 三端联调（**一键验证整条链路**）
 
