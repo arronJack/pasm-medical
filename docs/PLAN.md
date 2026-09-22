@@ -12,10 +12,19 @@
   避免"同源两份代码"再次分叉（本项目已因此坏过一次）。
 - **MCP stdio sidecar**：`pasm_medical/mcp/` 复用 `MedicalService` + 认知门面，
   不启 web_gateway HTTP（零端口污染），已通过 selftest 19 项 + e2e 15 项。
-- **业务层 JPA 持久化已落地**：患者 / 就诊 / 审计实体 + Repository + Service，
-  真实管理接口 `/api/admin/{patients,audit,stats}`、`/api/patient`、`/api/patient/encounters`。
-- **前端三栏 + 医护后台全部接通真实后端**（构建通过、零 TS 错误）。
-- **三端联调 `tools/e2e_stack.py` 全过**（15 项）。
+- **业务层 JPA 持久化已落地**：患者 / 就诊 / 审计 / **对接设置**实体 + Repository + Service，
+  真实管理接口 `/api/admin/{patients,audit,stats,config}`、`/api/patient`、
+  `/api/patient/encounters`、`/api/patient/encounter/{id}`。
+- **前端三栏 + 医护后台全部接通真实后端**（构建通过、零 TS 错误）；
+  历史问询点开是**结构化详情**（主诉/判断/处置/科室/分诊/时间），不是一句话。
+- **授权收紧**：`/api/admin/**` 限 `ROLE_STAFF`（患者令牌 403）；
+  就诊详情接口做**归属校验**（不校验就是自增 id 换号读全院病历）；
+  演示账号默认关闭（dev 档显式打开）。
+- **「期望 vs 生效」对账**：后台「对接设置」存的是机构期望值，认知服务用
+  `GET /api/config` 报出进程真实配置，不一致时界面显式提示漂移 ——
+  避免"配置了但其实没生效"。
+- **三端联调 `tools/e2e_stack.py` 全过**（31 项，含 7 项越权/非法输入反例；
+  业务层三个安全判据已做反向验证：故意改坏 → 确实转红 → 还原后 31/31）。
 
 > 结论：P0（打通链路）+ P1（医生助手 MVP 的骨架与核心接口）**已完成**；
 > P2（记忆分层 / 患者隔离 / 情绪共情 / 采纳反馈闭环）在认知服务侧已具备，

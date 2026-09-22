@@ -85,6 +85,8 @@
       <template v-else>
         <h2>对接设置</h2>
         <div class="form">
+          <p v-if="cfgErr" class="hint warn">读取当前设置失败：{{ cfgErr }}</p>
+
           <label><span>OCR 引擎</span>
             <select v-model="cfg.ocr">
               <option value="none">未配置（检验单功能不可用）</option>
@@ -107,10 +109,52 @@
             </select>
           </label>
           <label><span>模型名</span><input v-model="cfg.model" placeholder="如 qwen2.5:7b" /></label>
+          <label v-if="cfg.llm !== 'null'"><span>服务地址（可选）</span>
+            <input v-model="cfg.baseUrl"
+                   :placeholder="cfg.llm === 'ollama' ? '默认 http://127.0.0.1:11434' : '默认 https://api.openai.com/v1'" />
+          </label>
           <p v-if="cfg.llm === 'openai'" class="hint warn">
             ⚠ 使用云端 API 时，患者数据出网前**必须去标识化**（脱敏）。这不是建议，是合规要求。
           </p>
-          <button class="primary">保存（占位：待业务层接口就绪）</button>
+
+          <div class="save-row">
+            <button class="primary" :disabled="saving" @click="saveConfig">
+              {{ saving ? '保存中…' : '保存' }}
+            </button>
+            <span v-if="saveMsg" class="save-msg" :class="{ bad: saveBad }">{{ saveMsg }}</span>
+          </div>
+
+          <!-- 期望 vs 实际：防止"配置了但其实没生效" -->
+          <div class="applied" :class="{ drift: cfgView?.drift === true }">
+            <div class="applied-h">认知服务实际生效</div>
+            <template v-if="cfgView?.applied">
+              <div class="applied-b">
+                provider = <b>{{ cfgView.applied.provider || '（空）' }}</b>
+                · model = <b>{{ cfgView.applied.model || '（空）' }}</b>
+                <span v-if="cfgView.applied.provider_known === false" class="applied-warn">
+                  —— 这个 provider 系统不认识，会静默降级成"无模型"（模板话术）
+                </span>
+              </div>
+              <div v-if="cfgView.drift === true" class="applied-warn">
+                ⚠ 与上面保存的期望值**不一致**：真正在跑的是上面这一行，不是表单里的选项。
+                改环境变量（<code>PASM_MEDICAL_LLM</code> / <code>PASM_MEDICAL_LLM_MODEL</code>）
+                并重启认知服务后才会真正生效。
+              </div>
+              <div v-else class="applied-ok">✓ 与保存的期望值一致</div>
+            </template>
+            <div v-else class="applied-b unknown">
+              取不到 —— 认知服务不可达，因此**无法判断**当前配置是否真的生效（不做乐观假设）。
+            </div>
+          </div>
+
+          <p class="hint">
+            ★ 本表只存**非机密**的对接开关（期望值），供后台展示与审计用；
+            密钥（云 API key、LIS 口令）一律走环境变量，不落这张会被页面读出的表。
+          </p>
+          <p v-if="cfgView?.updatedAt" class="hint">
+            最后保存：{{ cfgView.updatedAt }}
+            <span v-if="cfgView.updatedBy">· {{ cfgView.updatedBy }}</span>
+          </p>
         </div>
       </template>
     </section>
@@ -119,7 +163,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { api } from '../api'
+import { api, type AdminConfigView, type DesiredConfig } from '../api'
 
 const tabs = [
   { id: 'patients', name: '患者情况' },
@@ -147,11 +191,48 @@ const kb = [
   { name: '红旗症状规则表', kind: '规则', ver: '2026.09-starter', reviewer: '', ok: false },
 ]
 
-const cfg = ref({ ocr: 'none', lis: 'off', llm: 'null', model: '' })
+// ── 对接设置：真实读写业务层（不再是前端占位）
+const cfg = ref<DesiredConfig>({ ocr: 'none', lis: 'off', llm: 'null', model: '', baseUrl: '' })
+const cfgView = ref<AdminConfigView | null>(null)
+const cfgErr = ref('')
+const saving = ref(false)
+const saveMsg = ref('')
+const saveBad = ref(false)
 
 function pct(v: number) { return Math.round((v || 0) * 100) + '%' }
 function urgencyText(u: string) {
   return u === 'emergency' ? '紧急' : u === 'urgent' ? '尽快' : '常规'
+}
+
+/** 读当前设置。★ 单独 try/catch：设置读不到不该把患者/统计/审计一起带崩。 */
+async function loadConfig() {
+  try {
+    const v = await api.adminConfig()
+    cfgView.value = v
+    cfg.value = { ...v.desired }
+    cfgErr.value = ''
+  } catch (e) {
+    cfgErr.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/** 保存。服务端会做白名单校验（前端下拉框不是安全边界），非法值返回 400 并如实显示。 */
+async function saveConfig() {
+  if (saving.value) return
+  saving.value = true
+  saveMsg.value = ''
+  saveBad.value = false
+  try {
+    const v = await api.saveAdminConfig({ ...cfg.value })
+    cfgView.value = v
+    cfg.value = { ...v.desired }
+    saveMsg.value = '已保存' + (v.updatedAt ? '（' + v.updatedAt + '）' : '')
+  } catch (e) {
+    saveBad.value = true
+    saveMsg.value = '保存失败：' + (e instanceof Error ? e.message : String(e))
+  } finally {
+    saving.value = false
+  }
 }
 
 async function load() {
@@ -178,6 +259,7 @@ async function load() {
   } finally {
     loading.value = false
   }
+  await loadConfig()
 }
 
 onMounted(load)
@@ -216,4 +298,24 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
   width: 100%; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff;
 }
 .primary { padding: 9px 18px; border: 0; border-radius: 8px; background: var(--primary); color: #fff; }
+.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 对接设置：保存反馈 + 期望/实际对账 */
+.save-row { display: flex; align-items: center; gap: 12px; }
+.save-msg { font-size: 12px; color: var(--ok-fg); }
+.save-msg.bad { color: var(--danger-fg); }
+.applied {
+  margin-top: 18px; padding: 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface); font-size: 12px;
+}
+.applied.drift { border-color: #f0c6c6; background: var(--danger-bg); }
+.applied-h { font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
+.applied-b { line-height: 1.8; }
+.applied-b.unknown { color: var(--text-3); }
+.applied-ok { color: var(--ok-fg); margin-top: 4px; }
+.applied-warn { color: var(--danger-fg); margin-top: 6px; line-height: 1.8; }
+.applied-warn code {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  background: #fff; padding: 1px 4px; border-radius: 4px;
+}
 </style>

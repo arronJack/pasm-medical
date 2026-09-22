@@ -8,8 +8,14 @@
        /api/consult/start       （薄转发 → 问诊树）
        /api/lab/parse           （薄转发 → 检验单识别，返回"待确认"）
        /api/encounters          （薄转发 → 记忆时间轴）
+       /api/patient/encounter/{id}  （就诊结构化详情 + 归属校验）
+       /api/admin/config        （对接设置读写 + 与认知服务实际值对账）
 
 判据只看**响应体与状态码**，不看进程有没有起来。
+
+★ 另外两个"关掉之后必须不成立"的反例（在第二个后端进程里跑）：
+  · 演示账号开关置 false 时，写在代码里的 staff/123456 **必须登不进去**；
+  · 患者角色令牌访问 /api/admin/** **必须 403**（后台能读全院患者、能改模型指向）。
 
 前置：
   · 后端已打包：cd backend && mvn -DskipTests package
@@ -120,9 +126,11 @@ def main() -> int:                                # noqa: C901
         return 2
 
     cog_port, api_port = free_port(), free_port()
+    strict_port = free_port()
     tmp = tempfile.mkdtemp(prefix="pasm-stack-")
     cog_log = os.path.join(tmp, "cognition.log")
     api_log = os.path.join(tmp, "backend.log")
+    strict_log = os.path.join(tmp, "backend-strict.log")
     procs = []
     try:
         # ---------- 1) 起 Python 认知服务
@@ -168,6 +176,25 @@ def main() -> int:                                # noqa: C901
         st, d = req("GET", base + "/actuator/health")
         check("业务层 /actuator/health 可达且 UP",
               st == 200 and d.get("status") == "UP", str(d)[:120])
+
+        # ---------- 2b) 第二个后端：演示账号**关掉**（反例进程）
+        # ★ 与主进程**并发**启动，避免把整体耗时翻倍。
+        #   它只回答一个问题：写死在代码里的 staff/123456 在关闭开关后是否真的登不进去。
+        #   只看代码不看行为，正是"默认开着、生产忘了关"这类事故的成因。
+        strict = subprocess.Popen(
+            [JAVA_BIN, "-jar", str(jar),
+             "--spring.profiles.active=dev",
+             "--server.port=%d" % strict_port,
+             "--medical.auth.demo-login-enabled=false",
+             "--pasm.cognition.base-url=http://127.0.0.1:%d" % cog_port,
+             "--pasm.cognition.token=" + API_TOKEN],
+            cwd=str(BACKEND), env=java_env,
+            stdout=open(strict_log, "w", encoding="utf-8"), stderr=subprocess.STDOUT)
+        procs.append(("backend-strict", strict))
+        strict_ok = wait_port(strict_port, timeout=180)
+        if not strict_ok:
+            print("  [提示] 反例后端没起来，相关断言将失败。日志尾部：")
+            print(read_tail(strict_log))
 
         # ---------- 3) 鉴权：不登录不能进
         st, _ = req("GET", base + "/api/encounters?patientRef=p1")
@@ -232,6 +259,89 @@ def main() -> int:                                # noqa: C901
         st, d = req("GET", base + "/api/admin/audit", token=token)
         check("★ 后台 /api/admin/audit 返回审计（append-only）",
               st == 200 and isinstance(d, list), str(d)[:160])
+
+        # ---------- 8) 就诊结构化详情（+ 归属校验反例）
+        st, encs = req("GET", base + "/api/patient/encounters?ref=demo-patient-001", token=token)
+        first_id = str(encs[0].get("id")) if isinstance(encs, list) and encs else ""
+        check("历史就诊列表带可用的 id（详情入口的前提）", bool(first_id), str(encs)[:160])
+
+        st, d = req("GET", base + "/api/patient/encounter/%s?ref=demo-patient-001" % first_id,
+                    token=token)
+        check("★ /api/patient/encounter/{id} 返回结构化详情（主诉/判断/处置/科室）",
+              st == 200 and bool(d.get("chiefComplaint")) and bool(d.get("assessment"))
+              and bool(d.get("plan")) and bool(d.get("department")), str(d)[:220])
+
+        # ★ 反例：换一个 ref 读同一条就诊 → 必须 404（不然自增 id 就是全院病历的钥匙）
+        st, d = req("GET", base + "/api/patient/encounter/%s?ref=somebody-else" % first_id,
+                    token=token)
+        check("★ 反例：就诊归属不符 → 404（挡住 IDOR）", st == 404, str(st) + " " + str(d)[:120])
+
+        # ---------- 9) 对接设置：真实读写 + 校验 + 与认知服务对账
+        st, d = req("GET", base + "/api/admin/config", token=token)
+        check("★ /api/admin/config 可读（返回期望值 + 认知服务实际值）",
+              st == 200 and isinstance(d.get("desired"), dict) and "drift" in d, str(d)[:200])
+
+        want = {"ocr": "vendor", "lis": "fhir", "llm": "ollama",
+                "model": "qwen2.5:7b", "baseUrl": "http://127.0.0.1:11434"}
+        st, d = req("POST", base + "/api/admin/config", want, token=token)
+        check("★ 保存对接设置成功且回显期望值",
+              st == 200 and d.get("desired", {}).get("llm") == "ollama"
+              and d.get("desired", {}).get("model") == "qwen2.5:7b", str(d)[:200])
+
+        # ★ 往返：重新 GET 必须读回刚存的值（证明是真落库，不是只在响应里回显）
+        st, d = req("GET", base + "/api/admin/config", token=token)
+        check("★ 往返持久化：重新读取仍是刚保存的值",
+              st == 200 and d.get("desired", {}).get("llm") == "ollama"
+              and d.get("desired", {}).get("baseUrl") == "http://127.0.0.1:11434",
+              str(d.get("desired"))[:200])
+        # 认知服务实际 provider 是 null（env 未配）→ 必须报出漂移，而不是假装生效
+        check("★ 期望(ollama) vs 实际(null) 被判定为漂移（不假装已生效）",
+              d.get("drift") is True and isinstance(d.get("applied"), dict),
+              "drift=%s applied=%s" % (d.get("drift"), str(d.get("applied"))[:120]))
+        check("已保存设置带修改时间/修改人（可追溯）",
+              bool(d.get("updatedAt")) and d.get("updatedBy") == "staff",
+              "at=%s by=%s" % (d.get("updatedAt"), d.get("updatedBy")))
+
+        # ★ 反例：白名单外的取值必须 400，而不是"静默改成默认值"
+        st, d = req("POST", base + "/api/admin/config",
+                    {"ocr": "evil", "lis": "off", "llm": "null", "model": "", "baseUrl": ""},
+                    token=token)
+        check("★ 反例：非法 ocr 取值 → 400（服务端白名单，前端下拉不是安全边界）",
+              st == 400, str(st) + " " + str(d)[:140])
+        st, d = req("POST", base + "/api/admin/config",
+                    {"ocr": "none", "lis": "off", "llm": "openai", "model": "gpt-4o-mini",
+                     "baseUrl": "不是URL"}, token=token)
+        check("★ 反例：baseUrl 非法 → 400", st == 400, str(st) + " " + str(d)[:140])
+        # 非法请求不该把已存的值改坏
+        st, d = req("GET", base + "/api/admin/config", token=token)
+        check("★ 反例请求被拒后，已保存的值未被破坏",
+              d.get("desired", {}).get("llm") == "ollama",
+              str(d.get("desired"))[:160])
+
+        # ---------- 10) 授权：患者角色拿不到后台（能读全院患者、能改模型指向）
+        st, d = req("POST", base + "/api/auth/login",
+                    {"username": "patient", "password": "123456"})
+        ptoken = d.get("token")
+        check("患者账号可登录（dev 演示账号）", st == 200 and bool(ptoken), str(d)[:120])
+        if ptoken:
+            st, d = req("GET", base + "/api/admin/patients", token=ptoken)
+            check("★ 患者令牌访问 /api/admin/** → 403（最小权限）", st == 403, str(st))
+            st, d = req("GET", base + "/api/patient?ref=demo-patient-001", token=ptoken)
+            check("患者令牌仍可用自己的诊疗接口（不是一刀切封死）", st == 200, str(st))
+
+        # ---------- 11) 演示账号开关：关掉之后写死的口令必须无效
+        sbase = "http://127.0.0.1:%d" % strict_port
+        if strict_ok:
+            st, d = req("POST", sbase + "/api/auth/login",
+                        {"username": "staff", "password": "123456"})
+            check("★ 反例：demo-login-enabled=false 时写死的 staff/123456 登不进去（401）",
+                  st == 401, str(st) + " " + str(d)[:120])
+            st, d = req("GET", sbase + "/api/admin/patients")
+            check("关闭演示账号后，未登录访问后台仍 401", st in (401, 403), str(st))
+        else:
+            check("★ 反例：demo-login-enabled=false 时写死的口令登不进去",
+                  False, "反例后端未启动")
+            check("关闭演示账号后未登录访问后台仍 401", False, "反例后端未启动")
     finally:
         for name, p in procs:
             try:

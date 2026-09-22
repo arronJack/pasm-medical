@@ -263,6 +263,32 @@ def selftest() -> int:
             check("不表示安全" in (c.get("note") or ""),
                   "规则结果带'空违例≠安全'说明")
 
+            # ---- LLM 生效配置对账（业务层「对接设置」靠它判断是否真生效）----
+            st = svc.llm_status()
+            check(st.get("provider") == "null" and st.get("provider_known") is True,
+                  "未配 LLM 时如实报 null（且算「已知档位」）", str(st)[:160])
+            check(st.get("source", "").startswith("env:"),
+                  "配置来源标注为环境变量", str(st.get("source"))[:80])
+            _saved = {k: _os.environ.get(k) for k in
+                      ("PASM_MEDICAL_LLM", "PASM_MEDICAL_LLM_API_KEY")}
+            try:
+                _os.environ["PASM_MEDICAL_LLM"] = "火星模型"
+                _os.environ["PASM_MEDICAL_LLM_API_KEY"] = "sk-abcdef123456"
+                st2 = svc.llm_status()
+                # ★ 反例对照：拼错的 provider 必须被判「未知」而不是静默当成可用
+                check(st2.get("provider_known") is False,
+                      "★ 未知 provider 判为未知（不假报可用）", str(st2)[:160])
+                check(st2.get("api_key") and "sk-abcdef123456" not in st2["api_key"],
+                      "★ 配置查询不回显 api_key（打码）", str(st2.get("api_key"))[:40])
+            finally:
+                for _k, _v in _saved.items():
+                    if _v is None:
+                        _os.environ.pop(_k, None)
+                    else:
+                        _os.environ[_k] = _v
+            check(svc.llm_status().get("provider_known") is True,
+                  "环境变量还原后恢复默认判定")
+
             # ---- 反例：未知工具 → 协议错误 ----
             r = handle_message(
                 {"jsonrpc": "2.0", "id": 10, "method": "tools/call",

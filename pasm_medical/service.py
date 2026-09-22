@@ -345,6 +345,35 @@ class MedicalService:
 
     # ---------------------------------------------------------- 运维
 
+    def llm_status(self) -> Dict[str, Any]:
+        """本服务**实际生效**的 LLM 配置（只读，供业务层做「期望 vs 实际」对账）。
+
+        ★ 为什么要有这个接口
+        --------------------
+        后台「对接设置」由业务层持久化（机构想用什么模型），但**真正跑模型的是这一层**。
+        两边一旦不一致（业务层写着 ollama，进程却是 ``PASM_MEDICAL_LLM=null``），
+        界面会一直显示"已配置"，而患者其实拿到的是模板话术 —— 这种"配置了但其实没生效"
+        比配置项本身不存在更危险。所以这里把**进程真实值**如实报出来，由业务层比对。
+
+        ★ 刻意**不做**可用性探测
+        ------------------------
+        :meth:`pasm_medical.llm.OllamaProvider.available` 会发一次 HTTP（3s 超时）。
+        配置查询是只读且高频的，不该在这里挂 3 秒；要探活请用 ``probe`` 参数显式要求。
+
+        api_key 一律打码（见 :meth:`pasm_medical.llm.LLMConfig.to_dict`）。
+        """
+        from .llm import LLMConfig, build_provider
+
+        cfg = LLMConfig.from_env()
+        out = cfg.to_dict()
+        out["source"] = "env:PASM_MEDICAL_LLM*"
+        # provider 是否被识别。判据取自 build_provider 本身（不另抄一份别名表，
+        # 否则别名表一改这里就开始说谎）：识别得出非 Null 实现即算已知；
+        # 显式写 "null" 也算已知（那是刻意的降级档，不是拼错）。
+        requested = (cfg.provider or "null").lower()
+        out["provider_known"] = (build_provider(cfg).name != "null") or (requested == "null")
+        return out
+
     def health(self) -> Dict[str, Any]:
         caps = self._caps()
         pm = getattr(self.app, "plugins", None)
@@ -420,6 +449,10 @@ def register_medical_routes(svc: "MedicalService") -> int:
                                        str(b.get("title") or ""),
                                        str(b.get("detail") or ""))
 
+    def _config(q, b):
+        """只读：本进程**实际生效**的 LLM 配置。业务层用它跟"机构期望值"对账。"""
+        return 200, svc.llm_status()
+
     routes = [
         ("POST", "/api/consult/start", _start),
         ("POST", "/api/consult/answer", _answer),
@@ -429,6 +462,7 @@ def register_medical_routes(svc: "MedicalService") -> int:
         ("POST", "/api/lab/confirm", _lab_confirm),
         ("GET", "/api/encounters", _encounters),
         ("POST", "/api/critical-fact", _critical),
+        ("GET", "/api/config", _config),
     ]
     for method, path, fn in routes:
         gw.register_route(method, path, fn)
@@ -495,7 +529,7 @@ def main() -> int:                                          # pragma: no cover
                         host=a.host, port=a.port, token=a.token)
     print(json.dumps(svc.health(), ensure_ascii=False, indent=2))
     print("\n认知接口前缀：/api/cog/  （详见 pasm-framework 的 web_gateway 文档）")
-    print("医疗接口：/api/consult/*、/api/lab/*、/api/encounters（需管理令牌）")
+    print("医疗接口：/api/consult/*、/api/lab/*、/api/encounters、/api/config（需管理令牌）")
     svc.app.serve()
 
     # ★ `serve()` 是**非阻塞**的：它在守护线程里起 HTTP 服务器后立刻返回。

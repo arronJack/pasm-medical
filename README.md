@@ -24,25 +24,36 @@ Vue 3 前端  ──►  Spring Boot 业务层  ──►  Python 认知服务�
 
 ```
 pasm-medical/
-├── backend/                # Spring Boot 3 / Java 21 —— 业务主干
+├── backend/                # Spring Boot 3 / Java 17+ —— 业务主干
 │   └── src/main/java/com/pasm/medical/
 │       ├── MedicalApplication.java
 │       ├── CognitionProperties.java
 │       ├── cognition/PasmCognitionClient.java   # ★ 认知服务客户端（唯一入口）
-│       └── web/AssistController.java            # ★ 给前端的接口
+│       ├── domain/                              # 患者 / 就诊 / 审计 / 对接设置 实体
+│       ├── repository/ service/                 # JPA 仓储 + 服务（含白名单校验）
+│       └── web/                                 # AuthController / AssistController
+│                                                # MedicalProxyController（薄转发）
+│                                                # AdminController（后台，限 ROLE_STAFF）
 ├── web/                    # Vue 3 + TS —— 诊疗工作台
-│   └── src/App.vue         # ★ 左栏就诊时间轴 + 右侧对话区
+│   └── src/views/          # LoginView / ConsultView（三栏）/ AdminView（后台）
 ├── pasm_medical/           # Python 认知服务侧（独立包，可单独 pip 安装）
 │   ├── domain.py           # 患者/就诊领域模型 + 患者级隔离规则
 │   ├── safety.py           # ★ 医疗安全护栏（红线写成代码）
+│   ├── llm.py              # 三档 LLM 网关（ollama / openai / null）
+│   ├── mcp/                # MCP stdio sidecar（复用同一门面，零端口污染）
 │   └── service.py          # 服务装配（多租户 + 患者隔离）
 ├── tools/                  # 端到端验证与反例对照
 ├── docs/
 │   ├── PLAN.md             # 完整开发方案（分层/合规/路线图/验收）
 │   ├── FEASIBILITY.md      # ★ 可行性评估：哪些能做、哪些要设边界、哪些不该自研
 │   └── GUIDE.md            # ★ 运作说明与功能说明（启动 / 部署 / 配置 / 排障）
-└── knowledge/              # 知识源（西医 / 中医），带版本清单
+├── pyproject.toml          # 打包 pasm_medical（可 pip 安装）
+└── LICENSE                 # MIT
 ```
+
+> 知识源（西医 / 中医指南、规则表、术语字典）**不放在仓库里**：它们随机构不同，
+> 且规则表必须经临床药师复核后随院内变更单发布。运行时用 `--dir` 指定知识库落点
+> （见 `docs/GUIDE.md` §4.2）。后台「资料库」页展示的是这些知识源的**版本与复核人**。
 
 ## 三条不能碰的红线
 
@@ -77,19 +88,26 @@ pip install "pasm-skills>=0.6.2" "pasm-framework>=0.5.2"
 pip install -e .
 PASM_MEDICAL_TOKEN=<管理令牌> python -m pasm_medical.service --port 8090
 
-# 2) Spring Boot 后端
-cd backend && mvn spring-boot:run          # http://127.0.0.1:8081
+# 2) Spring Boot 后端（dev 档 = H2 内存库 + 演示账号，无需外部数据库）
+cd backend && mvn spring-boot:run -Dspring-boot.run.profiles=dev   # http://127.0.0.1:8081
+#    演示账号（仅 dev）：staff / 123456（后台）、patient / 123456
+#    注意：非 dev 档演示账号默认关闭，且需要 PostgreSQL
 
 # 3) Vue 前端
-cd web && npm install && npm run dev
+cd web && npm install && npm run dev       # http://127.0.0.1:5173
 ```
+
+> 生产档不接受写死的演示账号 —— 必须接入医院统一身份（OIDC/OAuth2）或签名 JWT。
+> 这是刻意的默认值，见 `docs/GUIDE.md` §5.2。
 
 自检与端到端：
 
 ```bash
 python -m pasm_medical.domain            # 领域模型（隔离规则 / 去标识）
 python -m pasm_medical.safety            # 护栏（红线）
+python -m pasm_medical.mcp.server --selftest   # MCP sidecar，24 项
 python tools/e2e_medical_service.py      # 真起 HTTP 服务，17 项
+python tools/e2e_stack.py                # 三端联调，31 项（需先 mvn package）
 python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被抓到
 ```
 
@@ -102,13 +120,14 @@ python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被�
 | **LLM 网关（`llm.py`）** | ✅ 已实现并验证（11 项）：本地 Ollama / OpenAI 兼容 API / **无 LLM 降级**三档 |
 | 领域与安全（`domain.py` / `safety.py`） | ✅ 已实现并验证（14 + 16 项） |
 | 认知服务与患者隔离 | ✅ 已实现并验证（端到端 17 项 + 反例对照 5 项） |
-| **前端（`web/`）** | ✅ **构建通过**（vue-tsc 类型检查 + vite）；登录页 / 三栏工作台 / 医护后台 |
-| **Spring Boot 业务层** | ✅ **编译 + 启动 + 三端联调通过**（JDK 18 / Maven 3.8.6）；登录鉴权 / 薄转发 / 认知客户端已就绪；领域实体与审计待补 |
-| 三端联调 | ✅ `tools/e2e_stack.py` **10 项全过**（真起两个服务走真实 HTTP） |
+| **前端（`web/`）** | ✅ **构建通过**（vue-tsc 类型检查 + vite）；登录页 / 三栏工作台 / 医护后台，全部接通真实后端 |
+| **Spring Boot 业务层** | ✅ **编译 + 启动 + 三端联调通过**（JDK 18 / Maven 3.8.6）；登录鉴权（默认关闭演示账号）/ 薄转发 / 认知客户端；**JPA 持久化**（患者 / 就诊 / 审计 / 对接设置）+ 管理接口 `/api/admin/*`、`/api/patient/*` |
+| **授权与越权防护** | ✅ 后台限 `ROLE_STAFF`（患者令牌 403）；就诊详情做**归属校验**（挡 IDOR）；对接设置**服务端白名单校验** |
+| 三端联调 | ✅ `tools/e2e_stack.py` **31 项全过**（含 7 项越权/非法输入反例；3 个安全判据已做反向验证） |
 | 影像归档 | 未开始（P5，**只做归档与转交，不做分析**） |
 | 中医知识库 | 未开始（见 `docs/PLAN.md` §6） |
 
-**已验证的规模**：模块自检 **88 项** + 端到端 **17 项** + 反例对照 **5 项** + 三端联调 **10 项**（全部通过）。
+**已验证的规模**：模块自检 **88 项** + MCP selftest **24 项** + 端到端 **17 项** + 反例对照 **5 项** + 三端联调 **31 项**（全部通过）。
 
 > **启动、部署、配置、排障**见 [`docs/GUIDE.md`](docs/GUIDE.md)；
 > **功能说明**（每个功能在做什么、边界在哪）也在同一份文档里。

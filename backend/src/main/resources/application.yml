@@ -35,11 +35,18 @@ pasm:
     token: ${PASM_COGNITION_TOKEN:}
     timeout-seconds: 20
 
-# ── 审计 ───────────────────────────────────────────────────────────────
+# ── 认证 ───────────────────────────────────────────────────────────────
 medical:
+  auth:
+    # ★ 写死的演示账号（staff/patient，密码 123456）默认**关闭**。
+    #   开启它等于把演示口令带到生产 —— 所以只有 dev 档显式打开
+    #   （见 application-dev.yml）。生产必须接入医院统一身份：
+    #   OIDC/OAuth2 或签名 JWT（带过期与刷新），并把患者 ref 作为 claim 绑定进令牌。
+    demo-login-enabled: ${MEDICAL_AUTH_DEMO_LOGIN:false}
+
+  # 每次认知调用都要留痕：入参快照 / 召回条目 / 模型版本 / 操作者 / 时间。
+  # 生产建议落到**独立库**且只授予 INSERT（append-only），与业务库物理隔离。
   audit:
-    # 每次认知调用都要留痕：入参快照 / 召回条目 / 模型版本 / 操作者 / 时间。
-    # 生产建议落到**独立库**且只授予 INSERT（append-only），与业务库物理隔离。
     enabled: true
     store: db
 

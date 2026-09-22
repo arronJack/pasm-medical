@@ -85,6 +85,11 @@ export const api = {
     call<{ id: string; time: string; title: string; summary: string; urgency: string }[]>(
       '/patient/encounters?ref=' + encodeURIComponent(ref)),
 
+  /** 单次就诊的**结构化详情**（点开历史记录时用）。ref 必填且服务端会校验归属。 */
+  patientEncounter: (ref: string, id: string) =>
+    call<EncounterDetail>(
+      '/patient/encounter/' + encodeURIComponent(id) + '?ref=' + encodeURIComponent(ref)),
+
   /** 后台：真实患者列表（含最新就诊 / 分诊 / 次数）。 */
   adminPatients: () =>
     call<{ ref: string; name: string; allergy: string; chronic: string; encounterCount: number; last: string; dept: string; urgency: string }[]>(
@@ -99,6 +104,62 @@ export const api = {
   adminStats: () =>
     call<{ consultToday: number; redFlags: number; refusalRate: number; adoptionRate: number; askTotal: number; feedbackTotal: number }>(
       '/admin/stats'),
+
+  /**
+   * 后台：对接设置（读）。
+   *
+   * ★ `desired` 是**机构期望值**（业务层持久化）；`applied` 是**认知服务进程实际生效**的配置。
+   * 二者不一致时 `drift=true` —— 此时界面上的配置并没有真正生效，必须显式提示，
+   * 不能让医生以为"选了 ollama"就真的在用本地模型。`drift=null` 表示认知服务不可达（未知，不猜）。
+   */
+  adminConfig: () => call<AdminConfigView>('/admin/config'),
+
+  /** 后台：保存对接设置（幂等 upsert + 服务端白名单校验 + 留审计）。 */
+  saveAdminConfig: (cfg: DesiredConfig) =>
+    call<AdminConfigView>('/admin/config', {
+      method: 'POST', body: JSON.stringify(cfg),
+    }),
+}
+
+export interface EncounterDetail {
+  id: string
+  ref: string
+  time: string
+  chiefComplaint: string
+  assessment: string
+  plan: string
+  department: string
+  urgency: string
+  summary: string
+  requiresPhysicianConfirmation?: boolean
+}
+
+export interface DesiredConfig {
+  ocr: string
+  lis: string
+  llm: string
+  model: string
+  baseUrl: string
+}
+
+/** 认知服务进程**实际生效**的 LLM 配置（api_key 由服务端打码，绝不回显明文）。 */
+export interface AppliedConfig {
+  provider?: string
+  model?: string
+  base_url?: string
+  api_key?: string
+  source?: string
+  provider_known?: boolean
+}
+
+export interface AdminConfigView {
+  desired: DesiredConfig
+  updatedAt: string
+  updatedBy: string
+  applied: AppliedConfig | null
+  /** true=期望与实际不一致；false=一致；null=认知服务不可达，无从判断 */
+  drift: boolean | null
+  note?: string
 }
 
 export interface ConsultQuestion { key: string; text: string; why: string; from_tree: string }

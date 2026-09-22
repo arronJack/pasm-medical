@@ -22,7 +22,7 @@
           class="hist" :class="{ active: activeId === h.id }"
           @click="openHistory(h)"
         >
-          <span class="hist-time">{{ h.time }}</span>
+          <span class="hist-time">{{ h.time }}<em v-if="h.urgency === 'emergency'" class="hist-emg">紧急</em></span>
           <span class="hist-title">{{ h.title }}</span>
           <span class="hist-sub">{{ h.summary }}</span>
         </button>
@@ -34,12 +34,36 @@
     <section class="center">
       <div v-if="readonly" class="ro-bar">
         正在查看历史记录 · {{ activeTitle }} · <b>只读</b>
-        <button @click="continueFromHistory">继续这段对话</button>
+        <span class="ro-note">（只读时不能发送，避免误发成新问诊）</span>
+        <button @click="exitHistory">退出只读，开始新问询</button>
       </div>
 
       <div ref="msgBox" class="messages">
         <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
           <div class="bubble">{{ m.text }}</div>
+
+          <!-- 历史就诊的结构化详情（字段各自独立，而不是拼成一句话） -->
+          <div v-if="m.encounter" class="enc">
+            <div class="enc-h">
+              <span class="badge" :class="m.encounter.urgency">{{ urgencyOf(m.encounter.urgency) }}</span>
+              <span class="enc-t">{{ m.encounter.time }}</span>
+              <span v-if="m.encounter.department" class="enc-d">{{ m.encounter.department }}</span>
+              <span class="enc-id">#{{ m.encounter.id }}</span>
+            </div>
+            <dl class="enc-fields">
+              <template v-if="m.encounter.chiefComplaint"><dt>主诉</dt><dd>{{ m.encounter.chiefComplaint }}</dd></template>
+              <template v-if="m.encounter.assessment"><dt>判断</dt><dd>{{ m.encounter.assessment }}</dd></template>
+              <template v-if="m.encounter.plan"><dt>处置</dt><dd>{{ m.encounter.plan }}</dd></template>
+            </dl>
+            <p v-if="!m.encounter.chiefComplaint && !m.encounter.assessment && !m.encounter.plan"
+               class="enc-empty">
+              这次就诊没有留下结构化的主诉/判断/处置字段（可能早于结构化落库）。
+            </p>
+            <details v-if="m.encounter.summary" class="enc-sum">
+              <summary>原始摘要（可审计）</summary>
+              <div class="enc-sum-body">{{ m.encounter.summary }}</div>
+            </details>
+          </div>
 
           <div v-if="m.refused" class="refused">
             未找到可支撑该问题的资料，已如实说明（未编造）
@@ -82,12 +106,14 @@
       </div>
 
       <div class="composer">
-        <label class="up" title="上传检验单 / 病历图片">
-          ＋<input type="file" accept="image/*,.pdf" hidden @change="onFile" />
+        <label class="up" :class="{ off: readonly }" title="上传检验单 / 病历图片">
+          ＋<input type="file" accept="image/*,.pdf" hidden :disabled="readonly" @change="onFile" />
         </label>
-        <textarea v-model="draft" placeholder="描述症状，或直接提问（Ctrl+Enter 发送）"
+        <textarea v-model="draft" :disabled="readonly"
+                  :placeholder="readonly ? '只读模式：先点上方「退出只读」再输入'
+                                         : '描述症状，或直接提问（Ctrl+Enter 发送）'"
                   @keydown.ctrl.enter="send" />
-        <button class="primary" :disabled="busy || !draft.trim()" @click="send">
+        <button class="primary" :disabled="readonly || busy || !draft.trim()" @click="send">
           {{ busy ? '处理中…' : '发送' }}
         </button>
       </div>
@@ -150,7 +176,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
-import { api, type ConsultState, type Evidence, type LabItem, type Triage } from '../api'
+import { api, type ConsultState, type EncounterDetail, type Evidence, type LabItem, type Triage } from '../api'
 
 interface Msg {
   role: 'user' | 'assistant'
@@ -158,6 +184,8 @@ interface Msg {
   evidence?: Evidence[]
   refused?: boolean
   resolved?: string
+  /** 历史就诊的结构化详情（点开历史记录时拉取）。 */
+  encounter?: EncounterDetail
 }
 
 interface PatientProfile { ref: string; name: string | null; sex: string | null; age: number | null; allergy: string | null; chronic: string | null }
@@ -197,7 +225,7 @@ const urgencyText = computed(() => {
   return u === 'emergency' ? '紧急' : u === 'urgent' ? '尽快' : '常规'
 })
 
-const history = ref<{ id: string; time: string; title: string; summary: string }[]>([])
+const history = ref<{ id: string; time: string; title: string; summary: string; urgency?: string }[]>([])
 
 /** 左栏患者档案 + 历史就诊：全部来自业务层真实接口（dev 档由 DemoDataSeeder 灌演示数据）。 */
 async function loadPatient() {
@@ -223,6 +251,8 @@ async function scrollDown() {
 
 /** 描述症状 → 自动开一次问诊（主诉识别不出时后端会返回可选列表） */
 async function send() {
+  // ★ 只读态必须在这里也挡一道：禁用的按钮挡不住 Enter 键提交
+  if (readonly.value) return
   const q = draft.value.trim()
   if (!q || busy.value) return
   draft.value = ''
@@ -261,7 +291,7 @@ function applyState(st: ConsultState) {
 }
 
 async function submitAnswer(v?: string) {
-  if (state.value?.halted) return
+  if (readonly.value || state.value?.halted) return
   const val = (typeof v === 'string' ? v : answerDraft.value).trim()
   if (!val) return
   answerDraft.value = ''
@@ -281,7 +311,13 @@ async function submitAnswer(v?: string) {
 
 /** 上传检验单：先识别，结果**待确认**才写入 */
 async function onFile(ev: Event) {
-  const f = (ev.target as HTMLInputElement).files?.[0]
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  // 只读态不接受上传（历史记录不该被追加检验单）
+  if (readonly.value) {
+    input.value = ''
+    return
+  }
   if (!f) return
   messages.value.push({ role: 'user', text: '［上传］' + f.name })
   await scrollDown()
@@ -327,18 +363,60 @@ async function resolve(m: Msg, kind: string, action: string) {
   }
 }
 
-function openHistory(h: { id: string; title: string; summary: string }) {
+/**
+ * 点开一次历史问询。
+ *
+ * ★ 之前这里只把 `title + summary` 拼成一句话显示 —— 数据是真的（列表接口给的就是这些），
+ *   但医生看不到**字段各自的值**，等于"点开了却读不到病历"。现在改为拉
+ *   `GET /api/patient/encounter/{id}`，把主诉 / 判断 / 处置 / 科室 / 分诊 / 时间分开呈现。
+ *   ★ ref 一起传：服务端会校验这次就诊是否属于该患者（不校验就是 IDOR）。
+ */
+async function openHistory(h: { id: string; time: string; title: string; summary: string }) {
   activeId.value = h.id
   activeTitle.value = h.title
   readonly.value = true
-  messages.value = [{ role: 'assistant', text: '（历史记录）' + h.title + '：' + h.summary, resolved: '历史' }]
   state.value = null
+  // 历史记录是只读快照：把"当前这次问诊"的右栏内容清掉，避免看起来像是它的分析结果
+  labItems.value = []
+  labFlags.value = []
+  labNeedsConfirm.value = false
+  draft.value = ''
+  answerDraft.value = ''
+  messages.value = [{ role: 'assistant', text: '正在读取这次就诊的结构化记录…', resolved: '历史' }]
+  try {
+    const d = await api.patientEncounter(patient.value.ref, h.id)
+    messages.value = [{ role: 'assistant', text: '历史记录 · ' + (d.chiefComplaint || h.title),
+                        encounter: d, resolved: '历史' }]
+  } catch (e) {
+    // 详情取不到时**如实说明**，并回落到列表里已有的摘要（不假装详情加载成功了）
+    messages.value = [{
+      role: 'assistant',
+      text: '（历史记录）' + h.title + '：' + h.summary
+        + '\n\n（结构化详情读取失败：' + (e instanceof Error ? e.message : e) + '）',
+      resolved: '历史',
+    }]
+  }
 }
 
-function continueFromHistory() {
+/**
+ * 退出只读。
+ *
+ * ★ 不叫"继续这段对话"：Python 侧的问诊会话是**进程内**的（`_consults` 字典），
+ *   历史记录对应的会话早已结束/丢失，无法真的恢复。写"继续"会让人以为
+ *   接上了旧会话 —— 那正是界面说谎的典型。所以只如实说"可以开始新问询"。
+ */
+function exitHistory() {
   readonly.value = false
   activeId.value = ''
-  messages.value.push({ role: 'assistant', text: '已从该次问诊继续，请补充本次情况。' })
+  activeTitle.value = ''
+  messages.value.push({
+    role: 'assistant',
+    text: '已退出历史记录（只读）。历史问诊不会被恢复成进行中的会话 —— 发送新的描述会开启一次新的问询。',
+  })
+}
+
+function urgencyOf(u: string) {
+  return u === 'emergency' ? '紧急' : u === 'urgent' ? '尽快' : '常规'
 }
 
 function flagText(it: LabItem) {
@@ -380,6 +458,10 @@ function rowClass(it: LabItem) {
 .hist:hover { border-color: var(--line-strong); }
 .hist.active { border-color: var(--primary); background: #f3f8fa; }
 .hist-time { font-size: 11px; color: var(--text-3); }
+.hist-emg {
+  font-style: normal; font-size: 10px; margin-left: 6px; padding: 0 5px;
+  border-radius: 4px; background: var(--danger-bg); color: var(--danger-fg);
+}
 .hist-title { display: block; font-size: 13px; }
 .hist-sub { display: block; font-size: 12px; color: var(--text-2); }
 .empty { color: var(--text-3); font-size: 13px; }
@@ -393,6 +475,7 @@ function rowClass(it: LabItem) {
 }
 .ro-bar button { margin-left: auto; font-size: 12px; border: 1px solid var(--line-strong);
   background: #fff; border-radius: 6px; padding: 3px 10px; }
+.ro-note { color: var(--text-3); }
 .messages { flex: 1; overflow-y: auto; padding: 16px; }
 .msg { margin-bottom: 14px; }
 .msg.user { text-align: right; }
@@ -411,6 +494,22 @@ function rowClass(it: LabItem) {
   border: 1px solid var(--line-strong); background: #fff;
 }
 .resolved { margin-top: 4px; font-size: 12px; color: var(--ok-fg); }
+
+/* 历史就诊结构化详情 */
+.enc {
+  margin-top: 8px; padding: 12px 14px; border: 1px solid var(--line);
+  border-radius: var(--radius); background: #fff; max-width: 44em;
+}
+.enc-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.enc-t { font-size: 12px; color: var(--text-2); }
+.enc-d { font-size: 12px; color: var(--text-2); }
+.enc-id { margin-left: auto; font-size: 11px; color: var(--text-3); font-family: ui-monospace, Consolas, monospace; }
+.enc-fields { margin: 0; font-size: 13px; display: grid; grid-template-columns: 3.2em 1fr; column-gap: 0.4em; }
+.enc-fields dt { color: var(--text-3); font-size: 12px; padding-top: 2px; }
+.enc-fields dd { margin: 0 0 6px 0; line-height: 1.7; }
+.enc-empty { margin: 0; font-size: 12px; color: var(--text-3); }
+.enc-sum { margin-top: 8px; font-size: 12px; color: var(--text-3); }
+.enc-sum-body { margin-top: 4px; color: var(--text-2); line-height: 1.8; white-space: pre-wrap; }
 .ask { padding: 12px 16px; border-top: 1px solid var(--line); background: #fbfcfd; }
 .ask-q { font-size: 13px; margin-bottom: 8px; }
 .why { display: inline-block; margin-left: 8px; font-size: 12px; color: var(--text-3); }
@@ -426,10 +525,12 @@ function rowClass(it: LabItem) {
   width: 36px; height: 36px; border: 1px dashed var(--line-strong); border-radius: 8px;
   display: grid; place-items: center; color: var(--text-2); cursor: pointer; flex: 0 0 36px;
 }
+.up.off { opacity: 0.4; cursor: not-allowed; }
 .composer textarea {
   flex: 1; height: 62px; resize: none; padding: 8px 10px;
   border: 1px solid var(--line-strong); border-radius: 8px; outline: none;
 }
+.composer textarea:disabled { background: #f4f6f8; color: var(--text-3); cursor: not-allowed; }
 .primary { padding: 0 20px; height: 36px; border: 0; border-radius: 8px; background: var(--primary); color: #fff; }
 .primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .primary.small { height: 30px; font-size: 13px; margin-top: 8px; }

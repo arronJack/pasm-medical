@@ -17,3 +17,11 @@ spring:
 logging:
   level:
     com.pasm.medical: DEBUG
+
+medical:
+  auth:
+    # ★ 仅开发档打开演示账号（staff/123456、patient/123456），让前端与 e2e 能联调。
+    #   生产档（application.yml）默认 false —— 忘记配置的后果是"登不进去"（可发现），
+    #   而不是"写死的口令跟着上线"（不可发现）。真机上跑 e2e 可用
+    #   --medical.auth.demo-login-enabled=false 覆盖，验证关掉之后确实登不进去。
+    demo-login-enabled: true

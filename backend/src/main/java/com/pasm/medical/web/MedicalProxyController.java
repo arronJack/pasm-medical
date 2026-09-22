@@ -92,6 +92,40 @@ public class MedicalProxyController {
         return ResponseEntity.ok(out);
     }
 
+    /**
+     * 单次就诊的**结构化详情**（左栏点开历史记录时用）。
+     *
+     * <p>列表接口只给"标题 + 摘要"，够列表用但不够看诊：医生点开一次历史问询，
+     * 要看到主诉 / 判断 / 处置 / 科室 / 分诊 / 时间这些**各自独立的字段**，
+     * 而不是把它们拼成一句话再靠肉眼拆。
+     *
+     * <p>★ {@code ref} 必填，且与就诊归属强校验：id 是自增整数，
+     * 不校验归属就等于把全院病历开放给任何拿到患者令牌的人（IDOR）。
+     * 未命中一律 404，不区分"不存在"与"不属于你" —— 后者会变成 id 探测预言机。
+     */
+    @GetMapping("/patient/encounter/{id}")
+    public ResponseEntity<Map<String, Object>> patientEncounter(
+            @PathVariable Long id, @RequestParam String ref) {
+        Encounter e = encounters.findForPatient(ref, id);
+        if (e == null) {
+            return ResponseEntity.notFound().build();
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", String.valueOf(e.getId()));
+        m.put("ref", e.getPatientRef());
+        m.put("time", e.getOccurredAt() == null ? ""
+                : e.getOccurredAt().atZone(ZoneId.systemDefault())
+                        .toString().replace('T', ' ').substring(0, 16));
+        m.put("chiefComplaint", e.getChiefComplaint() == null ? "" : e.getChiefComplaint());
+        m.put("assessment", e.getAssessment() == null ? "" : e.getAssessment());
+        m.put("plan", e.getPlan() == null ? "" : e.getPlan());
+        m.put("department", e.getDepartment() == null ? "" : e.getDepartment());
+        m.put("urgency", e.getTriageUrgency() == null ? "routine" : e.getTriageUrgency());
+        m.put("summary", e.getSummaryText() == null ? "" : e.getSummaryText());
+        m.put("requiresPhysicianConfirmation", true);
+        return ResponseEntity.ok(m);
+    }
+
     @PostMapping("/consult/start")
     public ResponseEntity<Map<String, Object>> consultStart(@RequestBody Map<String, Object> body) {
         String ref = str(body, "patientRef");
