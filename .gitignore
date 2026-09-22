@@ -7,6 +7,9 @@ dist/
 .venv/
 venv/
 
+# 一键演示脚本（tools/demo/）的运行时落点：认知层工作根 + 日志
+.demo/
+
 # 认知服务运行时落点（**含患者记忆，绝不能入库**）
 .pasm-medical/
 *.jsonl

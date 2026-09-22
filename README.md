@@ -100,6 +100,12 @@ cd backend && mvn spring-boot:run -Dspring-boot.run.profiles=dev   # http://127.
 cd web && npm install && npm run dev       # http://127.0.0.1:5173
 ```
 
+> 🖱️ **Windows 一键启动**（不想逐条敲上面的命令时）：双击仓库里的
+> `tools\demo\start-demo.bat`。它会替你自检 Python（能 `import pasm_medical`）、
+> **JDK 17+（太旧会直接拦下并说清怎么改）**、Node、前端依赖，跳过已在监听的端口，
+> 拉起三个服务并打开工作台；停止双击 `tools\demo\stop-demo.bat`。
+> 详见 [`docs/GUIDE.md`](docs/GUIDE.md) §4.6。
+
 > 生产档不接受写死的演示账号 —— 必须接入医院统一身份（OIDC/OAuth2）或签名 JWT。
 > 这是刻意的默认值，见 `docs/GUIDE.md` §5.2。
 
@@ -129,6 +135,7 @@ python -m pasm_medical.mcp.server --selftest   # MCP sidecar，24 项
 python tools/e2e_medical_service.py      # 真起 HTTP 服务，17 项
 python tools/e2e_stack.py                # 三端联调，31 项（需先 mvn package）
 python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被抓到
+python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约 + 真跑 --check
 ```
 
 ## 现状与后续

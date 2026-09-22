@@ -1,0 +1,28 @@
+# 行尾契约。
+#
+# 为什么需要这个文件：.bat 若以 LF 行尾落到 Windows 上，cmd.exe 会把跨行
+# "( ... )" 块解析崩坏，导致**后续所有行连环错位**（2026-09-22 实测踩到）。
+# 而"checkout 出来是 CRLF 还是 LF"取决于各人本地的 core.autocrlf —— 靠本地配置
+# 保证不了，必须写进仓库：*.bat 一律以 LF 存库、以 CRLF 检出。
+#
+# 配套约定见 tools/demo/start-demo.bat 头部的 FILE FORMAT CONTRACT，
+# 以及 tools/check_demo_launchers.py（会静态检查并可用 --fix 规范化）。
+
+# Windows 脚本：必须 CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Unix 脚本：必须 LF（带 CRLF 会导致 "bad interpreter: No such file or directory"）
+*.sh    text eol=lf
+
+# 二进制：不做任何行尾转换
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.pdf   binary

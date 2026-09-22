@@ -355,6 +355,47 @@ python tools/e2e_stack.py
 > 脚本会**并发**多起一个后端进程（演示账号关闭）来跑最后那条反例 ——
 > 只看代码不看行为，正是"默认开着、生产忘了关"这类事故的成因。
 
+### 4.6 一键启动脚本（Windows，`tools/demo/`）
+
+把 §4.2~§4.4 的三条命令封装起来，免去手工设令牌、手工设 `JAVA_HOME`、对齐三个终端：
+
+```bat
+tools\demo\start-demo.bat              :: 起三个服务；已在监听的端口自动跳过
+tools\demo\start-demo.bat --check      :: 只做前置检查，不启动任何进程
+tools\demo\start-demo.bat --no-open    :: 不自动打开浏览器
+tools\demo\stop-demo.bat               :: 按端口停掉三个服务
+tools\demo\stop-demo.bat --check       :: 只看端口状态，不杀进程
+```
+
+它替你做的检查，每一条都对应一个"手工做容易踩"的点：
+
+| 检查 | 为什么需要 |
+|---|---|
+| Python 能 `import pasm_medical` | 该检查**从仓库外的目录执行**：`python -c` 会把当前目录放进 `sys.path`，在仓库根跑会"通过"而其实根本没装（实测踩到的假绿） |
+| **JDK ≥ 17** | Spring Boot 3 的硬要求。读 `java -version` 比对主版本，JDK 8 / 12 会被**明确拦下**并说清怎么改，不会拿着旧 JDK 硬跑出一堆莫名错误 |
+| Node + `web/node_modules/vite` | 缺了前端会白屏 |
+| 端口占用 | 已在监听的端口**跳过**，所以可以反复双击，不会起两份 |
+| 令牌一致 | 认知服务与业务层必须同一个令牌；不设 `PASM_MEDICAL_TOKEN` 时用内置 dev 默认值（**仅本机演示**，生产走密钥管理） |
+| 健康锚点 | 启动后打印 `:8090/healthz` 的 **`custom_routes`**（必须 > 0）——只看"服务活着"看不出医疗接口挂没挂 |
+
+可用的环境变量覆盖（都不设也能跑，路径按 `PASM_MEDICAL_*` → `.venv` → `venv` → `PATH` 的顺序探测）：
+`PASM_MEDICAL_PYTHON`、`PASM_MEDICAL_JAVA`、`PASM_MEDICAL_NODE`、`PASM_MEDICAL_TOKEN`。
+运行时数据落在 `<repo>\.demo\`（已进 `.gitignore`）。
+
+> ★★ **改这两个 .bat 之前必读：格式契约**
+> 文件必须保持 **纯 ASCII + CRLF 行尾**，并且**不要出现跨行 `( ... )` 块**（用 `goto` 标签代替）。
+> 原因：cmd.exe 按**控制台代码页**解析 .bat，且对行尾很敏感。2026-09-22 实测踩到过 ——
+> 文件存成 UTF-8 且是 LF 行尾时，中文注释按 GBK 解码成乱码、半截中文被当成命令执行，
+> **后续所有行连环错位**，双击后满屏 `'xxx' is not recognized as an internal or external command`。
+> 消息刻意写成英文：这是公开仓库，控制台代码页随地区变（936 / 950 / 932 / 1252 / 65001）。
+>
+> 三道保险：① 本节的书写约定；② `.gitattributes` 的 `*.bat text eol=crlf`（保证检出即 CRLF，
+> 不依赖各人本地的 `core.autocrlf`）；③ 校验脚本（**含 4 个反例对照**，证明检查项不是空的）：
+> ```bash
+> python tools/check_demo_launchers.py           # 静态契约 + 反例对照 + 真跑 --check
+> python tools/check_demo_launchers.py --fix     # 顺手把孤立 LF 规范成 CRLF
+> ```
+
 ---
 
 ## 五、部署（生产）
