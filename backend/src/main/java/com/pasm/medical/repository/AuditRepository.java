@@ -4,6 +4,7 @@ import com.pasm.medical.domain.AiAudit;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 
 public interface AuditRepository extends JpaRepository<AiAudit, Long> {
@@ -12,6 +13,16 @@ public interface AuditRepository extends JpaRepository<AiAudit, Long> {
     List<AiAudit> findTop200ByOrderByOccurredAtDesc();
 
     List<AiAudit> findByPatientRefOrderByOccurredAtDesc(String patientRef);
+
+    /**
+     * 科室范围：只看这些患者的审计（同样是最近 200 条窗口）。
+     *
+     * <p>★ 必须在库里筛，**不能**"取最近 200 条再在内存里过滤"：
+     * 本科室的事件不落在那 200 条里时，界面会**静默变空**，
+     * 看起来像"本科室没有活动"，实际是筛选方式错了。
+     */
+    List<AiAudit> findTop200ByPatientRefInOrderByOccurredAtDesc(
+            Collection<String> patientRefs);
 
     long countByAction(String action);
 

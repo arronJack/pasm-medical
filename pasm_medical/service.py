@@ -414,6 +414,23 @@ class MedicalService:
 
     # ---------------------------------------------------------- 预问诊（问诊树）
 
+    @staticmethod
+    def _session_key(patient_ref: str, session_key: str = "") -> str:
+        """会话键 = 患者 + 会话名（**必须按患者隔离**）。
+
+        ★ 为什么不能只用 session_key：调用方传的默认值是 ``"current"``，
+        直接用它当键会让**全租户只有一条会话** —— 患者 B 回答 "current" 就改到了
+        患者 A 的进行中会话，采集到的事实还会写进 A 的记忆（``ConsultSession.patient_ref`` 是 A）。
+        这类串号不报错：两边都"能用"，只是内容混在一起，事后极难查。
+
+        返回空串 = 无法确定归属（缺少 patient_ref），调用方必须拒绝而不是猜一个。
+        """
+        ref = (patient_ref or "").strip()
+        if not ref:
+            return ""
+        name = (session_key or "").strip() or "current"
+        return "%s:%s" % (ref, name)
+
     def start_consult(self, patient_ref: str, chief_complaint: str = "",
                       session_key: str = "") -> Dict[str, Any]:
         """开一次预问诊。返回首个问题（或红十字直接建议就医）。
@@ -421,8 +438,11 @@ class MedicalService:
         ★ 问诊状态**进程内保存**（``self._consults``）—— 这是 P1 的第一版。
         生产必须落到 Redis/DB：多实例部署下进程内状态会丢，患者刷新就断线。
         """
+        key = self._session_key(patient_ref, session_key)
+        if not key:
+            return {"ok": False,
+                    "error": "patientRef 不能为空：会话必须归属到患者"}
         s = ConsultSession(self.engine, patient_ref=patient_ref)
-        key = session_key or patient_ref
         if chief_complaint:
             r = s.set_chief_complaint(chief_complaint)
             if not r.get("ok"):
@@ -431,12 +451,22 @@ class MedicalService:
         return self._consult_state(s)
 
     def answer_consult(self, text_or_key: str, value: str = "",
-                       session_key: str = "", *, by_key: bool = False) -> Dict[str, Any]:
-        """回答当前问题。``by_key=True`` 时第一个参数是问题 key。"""
-        key = session_key or text_or_key if by_key else session_key
-        s = self._consults.get(session_key)
+                       session_key: str = "", *, by_key: bool = False,
+                       patient_ref: str = "") -> Dict[str, Any]:
+        """回答当前问题。``by_key=True`` 时第一个参数是问题 key。
+
+        ★ ``patient_ref`` 是必填的语义要求：找不到归属就返回失败，
+        而不是"退回全局会话" —— 后者正是串号的来源。
+        """
+        key = self._session_key(patient_ref, session_key)
+        if not key:
+            return {"ok": False,
+                    "error": "缺少 patient_ref：无法确定这是谁的问诊会话"}
+        s = self._consults.get(key)
         if s is None:
-            return {"ok": False, "error": "没有进行中的问诊，请先调用 start_consult"}
+            return {"ok": False,
+                    "error": "没有进行中的问诊（或该会话不属于此患者），"
+                             "请先调用 start_consult"}
         if by_key:
             r = s.answer(text_or_key, value)
         else:
@@ -451,9 +481,10 @@ class MedicalService:
                                        involved=[x["id"] for x in r["red_flags"]])
         return out
 
-    def finish_consult(self, session_key: str) -> Dict[str, Any]:
+    def finish_consult(self, session_key: str, patient_ref: str = "") -> Dict[str, Any]:
         """结束问诊，产出《预问诊摘要》并写入认知记忆。"""
-        s = self._consults.get(session_key)
+        key = self._session_key(patient_ref, session_key)
+        s = self._consults.get(key) if key else None
         if s is None:
             return {"ok": False, "error": "没有进行中的问诊"}
         sm = s.summary()
@@ -464,7 +495,7 @@ class MedicalService:
             self.observe_note(s.patient_ref, "预问诊·%s" % s.chief_complaint,
                               "；".join("%s：%s" % (k, v)
                                         for k, v in list(s.facts.items())[:8]), 4)
-        self._consults.pop(session_key, None)
+        self._consults.pop(key, None)
         return {"ok": True, **sm}
 
     def _consult_state(self, s: "ConsultSession") -> Dict[str, Any]:
@@ -586,16 +617,18 @@ def register_medical_routes(svc: "MedicalService") -> int:
         return 200, svc.start_consult(
             str(b.get("patientRef") or ""),
             str(b.get("chiefComplaint") or ""),
-            session_key=str(b.get("sessionKey") or "current"))
+            session_key=str(b.get("sessionKey") or ""))
 
     def _answer(q, b):
         return 200, svc.answer_consult(
             str(b.get("value") or ""),
-            session_key=str(b.get("sessionKey") or "current"),
-            by_key=bool(b.get("byKey")))
+            session_key=str(b.get("sessionKey") or ""),
+            by_key=bool(b.get("byKey")),
+            patient_ref=str(b.get("patientRef") or ""))
 
     def _finish(q, b):
-        return 200, svc.finish_consult(str(b.get("sessionKey") or "current"))
+        return 200, svc.finish_consult(str(b.get("sessionKey") or ""),
+                                       patient_ref=str(b.get("patientRef") or ""))
 
     def _lab_parse(q, b):
         return 200, svc.parse_lab_image(

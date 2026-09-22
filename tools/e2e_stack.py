@@ -10,6 +10,7 @@
        /api/encounters          （薄转发 → 记忆时间轴）
        /api/patient/encounter/{id}  （就诊结构化详情 + 归属校验）
        /api/admin/config        （对接设置读写 + 与认知服务实际值对账）
+       /api/auth/me             （身份 → 业务实体绑定：角色/科室/patientRef）
 
 判据只看**响应体与状态码**，不看进程有没有起来。
 
@@ -221,10 +222,23 @@ def main() -> int:                                # noqa: C901
               d.get("requiresPhysicianConfirmation") is True, str(list(d))[:120])
 
         st, d = req("POST", base + "/api/consult/answer",
-                    {"sessionKey": "current", "value": "往左肩和后背串"}, token=token)
+                    {"patientRef": "p1", "sessionKey": "current",
+                     "value": "往左肩和后背串"}, token=token)
         check("★ 红旗命中并中断问诊（红→橙→红 的完整链路）",
               st == 200 and d.get("halted") is True
               and bool(d.get("red_flags")), str(d)[:200])
+
+        # ★ 会话必须按患者隔离。原实现里会话键**恒为 "current"**（全租户一条会话），
+        #   于是下面这一步会"回答成功"并把事实写到 p1 身上 —— 两个人的问诊串在一起。
+        st, d = req("POST", base + "/api/consult/answer",
+                    {"patientRef": "p2-session-probe", "sessionKey": "current",
+                     "value": "往左肩和后背串"}, token=token)
+        check("★ 反例：别的患者回答同一会话 → 查不到会话（会话按患者隔离）",
+              st == 200 and d.get("ok") is False, str(st) + " " + str(d)[:160])
+        st, d = req("POST", base + "/api/consult/finish",
+                    {"patientRef": "p1", "sessionKey": "current"}, token=token)
+        check("★ 被越权尝试之后 p1 的会话仍完好（能正常结束并产出摘要）",
+              st == 200 and d.get("ok") is True, str(d)[:160])
 
         # ---------- 5) 检验单：返回"待确认"
         st, d = req("POST", base + "/api/lab/parse",
@@ -413,6 +427,57 @@ def main() -> int:                                # noqa: C901
             check("★ 患者令牌访问 /api/admin/** → 403（最小权限）", st == 403, str(st))
             st, d = req("GET", base + "/api/patient?ref=demo-patient-001", token=ptoken)
             check("患者令牌仍可用自己的诊疗接口（不是一刀切封死）", st == 200, str(st))
+
+        # ---------- 10b) 身份 → 业务实体映射：患者只能看自己的记录（资源级判定）
+        #   ★ 这一层是 URL 级授权挡不住的：接口本身合法（患者有令牌、路径也对），
+        #     错的是"他要看的那条 ref 不属于他"。旧实现只校验"已认证"，所以这里全是 200。
+        st, d = req("GET", base + "/api/auth/me", token=ptoken)
+        check("★ /api/auth/me 返回身份与绑定（患者 patientRef=demo-patient-001）",
+              st == 200 and d.get("patientRef") == "demo-patient-001"
+              and d.get("role") == "PATIENT"
+              and str(d.get("scopeLabel", "")).startswith("本人"),
+              str(d)[:200])
+        st, d = req("GET", base + "/api/patient?ref=demo-patient-002", token=ptoken)
+        check("★ 患者令牌换 ref 读他人档案 → 403（IDOR；旧实现返回 200）",
+              st == 403, str(st) + " " + str(d)[:120])
+        st, d = req("GET", base + "/api/patient/encounters?ref=demo-patient-002", token=ptoken)
+        check("★ 患者令牌换 ref 读他人就诊列表 → 403", st == 403, str(st))
+        st, d = req("POST", base + "/api/consult/start",
+                    {"patientRef": "demo-patient-002", "chiefComplaint": "咳嗽三天"}, token=ptoken)
+        check("★ 患者令牌以他人 ref 发起问诊 → 403", st == 403, str(st))
+        st, d = req("GET", base + "/api/patient", token=ptoken)
+        check("患者不传 ref 时按本人处理（前端不必替患者重复声明一遍身份）",
+              st == 200 and d.get("ref") == "demo-patient-001", str(d)[:140])
+
+        # ---------- 10c) 数据范围：科室角色只看本科室，超管看全院
+        st, d = req("POST", base + "/api/auth/login",
+                    {"username": "doctor", "password": "123456"})
+        dtoken = d.get("token")
+        check("医护账号可登录且带科室绑定（doctor → 发热门诊）",
+              st == 200 and d.get("role") == "DOCTOR"
+              and d.get("department") == "发热门诊", str(d)[:180])
+        if dtoken:
+            st, d = req("GET", base + "/api/admin/patients", token=dtoken)
+            refs = [x.get("ref") for x in d] if isinstance(d, list) else []
+            # ★ 判据是"看不到不在本科室的那一位"。只有一位患者时科室过滤与不过滤结果一样，
+            #   那种"全绿"测不出任何东西 —— 演示数据里因此刻意放了第二位（骨科）。
+            check("★ 科室范围：发热门诊医护看得到本科室患者，看不到骨科那一位",
+                  st == 200 and "demo-patient-001" in refs
+                  and "demo-patient-002" not in refs,
+                  "%s %s" % (st, refs))
+            st, d = req("POST", base + "/api/admin/config",
+                        {"ocr": "builtin", "lis": "none", "llm": "ollama"}, token=dtoken)
+            check("★ 反例：医护改系统配置 → 403（仅超管；它决定患者数据会不会出网）",
+                  st == 403, str(st))
+            st, d = req("POST", base + "/api/admin/kb",
+                        {"title": "不应写入", "content": "x", "tags": ["x"]}, token=dtoken)
+            check("★ 反例：科室角色写资料库 → 403（资料库是全院依据，属超管）",
+                  st == 403, str(st))
+        st, d = req("GET", base + "/api/admin/patients", token=token)
+        refs_all = [x.get("ref") for x in d] if isinstance(d, list) else []
+        check("★ 超管看全院：两位演示患者都在",
+              st == 200 and "demo-patient-001" in refs_all
+              and "demo-patient-002" in refs_all, str(refs_all))
 
         # ---------- 11) 演示账号开关：关掉之后写死的口令必须无效
         sbase = "http://127.0.0.1:%d" % strict_port

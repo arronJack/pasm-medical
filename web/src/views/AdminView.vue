@@ -10,6 +10,15 @@
       <p v-if="loading" class="hint">正在从业务层拉取真实数据…</p>
       <p v-if="err" class="hint warn">加载失败：{{ err }}</p>
 
+      <!-- ★ 数据范围必须常驻可见：不写清范围，使用者会把"本科室的数字"当成"全院的数字" -->
+      <p v-if="me" class="scope">
+        {{ me.displayName || me.username }} ·
+        <span class="scopebadge">{{ me.roleLabel }}</span>
+        <span class="scopebadge">数据范围：{{ me.scopeLabel }}</span>
+        <span v-if="me.department" class="scopebadge">科室：{{ me.department }}</span>
+        <span v-if="!canWriteKb" class="scopebadge muted">资料库与对接设置：只读（需超级管理员）</span>
+      </p>
+
       <!-- 患者情况 -->
       <template v-if="tab === 'patients'">
         <h2>患者情况</h2>
@@ -36,7 +45,7 @@
           正文不参与该判定（避免"正文里偶然提到"造成的答非所问）。<strong>下架 = 不再作为任何回答的依据</strong>。
         </p>
 
-        <div class="kbf">
+        <div v-if="canWriteKb" class="kbf">
           <input v-model.trim="kbForm.docKey" placeholder="资料键（留空自动生成；填已有键 = 编辑）" />
           <input v-model.trim="kbForm.title" placeholder="标题（必填）" />
           <input v-model.trim="kbForm.tags" placeholder="标签，逗号分隔 —— 相关性闸门的命中面" />
@@ -51,6 +60,10 @@
             <span v-if="kbMsg" class="kbmsg" :class="kbBad ? 'bad' : 'ok'">{{ kbMsg }}</span>
           </div>
         </div>
+        <p v-else class="hint warn">
+          只读：资料库的改动会影响<strong>全院</strong>的答案依据（一个科室改掉的是所有科室的依据），
+          因此只有<strong>超级管理员</strong>可以修改。当前身份「{{ me?.roleLabel || '—' }}」可查看与核对。
+        </p>
 
         <table>
           <thead>
@@ -71,9 +84,9 @@
               </td>
               <td class="mono">{{ d.updatedAt }}</td>
               <td class="ops">
-                <button @click="editKb(d)">编辑</button>
-                <button @click="toggleKb(d)">{{ d.status === 'active' ? '下架' : '上架' }}</button>
-                <button @click="delKb(d)">删除</button>
+                <button :disabled="!canWriteKb" @click="editKb(d)">编辑</button>
+                <button :disabled="!canWriteKb" @click="toggleKb(d)">{{ d.status === 'active' ? '下架' : '上架' }}</button>
+                <button :disabled="!canWriteKb" @click="delKb(d)">删除</button>
               </td>
             </tr>
             <tr v-if="!kbDocs.length">
@@ -85,7 +98,7 @@
         </table>
         <p class="hint">
           生效 {{ kbActive }} 条 · 下架 {{ kbInactive }} 条
-          <button class="mini" :disabled="kbBusy" @click="syncKb()">重新同步到认知侧</button>
+          <button class="mini" :disabled="kbBusy || !canWriteKb" @click="syncKb()">重新同步到认知侧</button>
         </p>
         <p class="hint warn">
           ⚠ 规则表（中药配伍禁忌 / 妊娠禁忌 / 毒性剂量上限）投产前**必须由临床药师逐条复核**
@@ -96,6 +109,7 @@
       <!-- 统计 -->
       <template v-else-if="tab === 'stats'">
         <h2>运营统计</h2>
+        <p v-if="statsNote" class="hint warn">{{ statsNote }}</p>
         <div class="kpis">
           <div v-for="s in stats" :key="s.label" class="kpi">
             <div class="kpi-v">{{ s.value }}</div>
@@ -220,8 +234,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { api, type AdminConfigView, type DesiredConfig, type KbDoc } from '../api'
+import { computed, ref, onMounted } from 'vue'
+import { api, type AdminConfigView, type DesiredConfig, type IdentityView, type KbDoc } from '../api'
+import { ensureIdentity } from '../identity'
 
 const tabs = [
   { id: 'patients', name: '患者情况' },
@@ -236,6 +251,13 @@ const tab = ref('patients')
 interface PatientRow { ref: string; name: string; allergy: string; chronic: string; encounterCount: number; last: string; dept: string; urgency: string }
 const patients = ref<PatientRow[]>([])
 const stats = ref<{ label: string; value: string | number; note: string }[]>([])
+/** 统计口径的数据范围说明（来自服务端 scopeNote）—— 科室角色看到的是全院口径，必须标明。 */
+const statsNote = ref('')
+
+/** 当前身份与可写范围。★ 界面据此禁用按钮只是体验；服务端会独立拒绝（不能只靠隐藏）。 */
+const me = ref<IdentityView | null>(null)
+const canWriteKb = computed(() => !!me.value?.canWriteKb)
+const canWriteConfig = computed(() => !!me.value?.canWriteConfig)
 interface AuditRow {
   id: number
   time: string
@@ -407,6 +429,8 @@ async function saveConfig() {
 async function load() {
   loading.value = true
   err.value = ''
+  // 身份决定本页显示的数据范围，先取到（取不到不阻断加载，只是范围提示为空）
+  me.value = await ensureIdentity()
   try {
     const [ps, st, au] = await Promise.all([
       api.adminPatients(), api.adminStats(), api.adminAudit(),
@@ -416,6 +440,8 @@ async function load() {
     // 用 unknown 而不是 number：这个响应里既有数字也有字符串（zone / windowFrom / definitions）
     const s = st as Record<string, unknown>
     const n = (k: string) => Number(s[k] ?? 0)
+    // ★ 范围必须显示出来，理由同时间窗：不看范围就不能判断这个数字代表谁
+    statsNote.value = String(s.scopeNote ?? '')
     stats.value = [
       {
         label: '今日问诊量',
@@ -508,6 +534,15 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
   border: 1px solid var(--line-strong); background: #fff; cursor: pointer; }
 .empty { padding: 18px; text-align: center; color: var(--text-3); font-size: 13px; }
 .hint { margin-top: 16px; font-size: 12px; color: var(--text-3); line-height: 1.8; }
+.scope {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 0 0 16px; font-size: 12px; color: var(--text-2);
+}
+.scopebadge {
+  font-style: normal; padding: 1px 8px; border-radius: 5px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--text-2);
+}
+.scopebadge.muted { color: var(--warn-fg); background: var(--warn-bg); border-color: var(--warn-bg); }
 .hint.warn { color: var(--warn-fg); background: var(--warn-bg); padding: 10px 12px; border-radius: 8px; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
 .kpi { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; background: var(--surface); }

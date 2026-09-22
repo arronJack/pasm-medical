@@ -2,6 +2,7 @@ package com.pasm.medical.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.pasm.medical.cognition.PasmCognitionClient;
+import com.pasm.medical.config.IdentityContext;
 import com.pasm.medical.domain.AiAudit;
 import com.pasm.medical.domain.Encounter;
 import com.pasm.medical.domain.Patient;
@@ -30,9 +31,19 @@ import java.util.Map;
  * <p>之前这些面板是前端硬编码的占位。现在从业务库（JPA）实时读取，
  * 与「诊断辅助」链路同源，不再是假数据。
  *
- * <p>★ 授权：整个 {@code /api/admin/**} 在 {@link com.pasm.medical.config.SecurityConfig}
- * 里被限制为 {@code ROLE_STAFF}。这不是可选项 —— 这些接口能读出全院患者的过敏史，
- * 还能改「大模型指向何处」（决定患者数据会不会出网）。患者令牌必须拿不到。
+ * <p>★ 授权分**两层**，缺一层都不够：
+ * <ol>
+ *   <li>{@code SecurityConfig} 限制访客：{@code /api/admin/**} 只给医护侧角色，
+ *       患者令牌一律 403；其中改配置与资料库**仅超管**（它们决定患者数据会不会出网、
+ *       以及全院的答案依据）。</li>
+ *   <li>本层再按身份收窄**数据范围**：超管看全院；医护与科室管理员看**本科室**
+ *       （见 {@link IdentityContext#scopeDepartment}）。少了第二层，
+ *       "能进这个接口"就等价于"能看全院所有患者的过敏史"。</li>
+ * </ol>
+ *
+ * <p>⚠️ <b>如实标注</b>：{@code /stats} 目前仍是**全院口径**（科室维度统计尚未实现），
+ * 因此它对科室角色会显式带上 {@code scope} 与 {@code scopeNote} ——
+ * 标清口径，而不是假装那些数字是本科室的。
  */
 @RestController
 @RequestMapping("/api/admin")
@@ -59,10 +70,16 @@ public class AdminController {
     /** 患者情况：每位患者最新一次就诊 + 分诊 + 就诊次数。 */
     @GetMapping("/patients")
     public ResponseEntity<List<Map<String, Object>>> patients() {
-        // 读审计：这是**全院患者名单**，比看单个患者档案更敏感 —— 谁拉过这份名单必须留痕
-        audit.recordRead(AuditService.currentActor(null), "", "read-admin-patients", "scope=all");
+        // ★ 数据范围：超管 dept=null（全院）；医护/科室管理员 = 本科室出现过的患者
+        String dept = IdentityContext.scopeDepartment();
+        List<String> inScope = dept == null ? null : encounters.patientRefsInDepartment(dept);
+        // 读审计：患者名单比看单个患者档案更敏感 —— 谁拉过这份名单必须留痕
+        audit.recordRead(AuditService.currentActor(null), "", "read-admin-patients",
+                "scope=" + (dept == null ? "all" : "department:" + dept));
         ZoneId z = ZoneId.systemDefault();
-        var out = patients.findTop100ByOrderByCreatedAtDesc().stream().map(p -> {
+        var out = patients.findTop100ByOrderByCreatedAtDesc().stream()
+                .filter(p -> inScope == null || inScope.contains(p.getRef()))
+                .map(p -> {
             var last = encounters.findByPatientRefOrderByOccurredAtDesc(p.getRef())
                     .stream().findFirst().orElse(null);
             Map<String, Object> m = new java.util.LinkedHashMap<>();
@@ -94,11 +111,28 @@ public class AdminController {
      *
      * <p>快照可能是整段配置或整句提问，统一截到 {@value #SNAPSHOT_LIMIT} 字再下发，
      * 避免一条记录把整个列表撑大；截断会加省略号，不假装是全文。
+     *
+     * <p>★ 范围：超管 = 全院最近 200 条；医护/科室管理员 = **本科室患者**相关的记录。
+     * 因此登录/登出/改配置这类没有 {@code patientRef} 的事件对科室角色不可见 ——
+     * 它们不属于"本科室患者数据"，要看它们请用超管账号。
      */
     @GetMapping("/audit")
     public ResponseEntity<List<Map<String, Object>>> audit() {
         ZoneId z = ZoneId.systemDefault();
-        var out = audits.findTop200ByOrderByOccurredAtDesc().stream().map(a -> {
+        // ★ 在**数据库**里筛，不要"取最近 200 条再在内存里过滤"：
+        //   本科室事件不落在那 200 条里时，界面会静默变空
+        String dept = IdentityContext.scopeDepartment();
+        List<AiAudit> rows;
+        if (dept == null) {
+            rows = audits.findTop200ByOrderByOccurredAtDesc();
+        } else {
+            List<String> inScope = encounters.patientRefsInDepartment(dept);
+            // ★ 本科室没有患者时返回空，**不能**退化成"查全部" —— 那是把越权包装成正常返回
+            rows = inScope.isEmpty()
+                    ? List.of()
+                    : audits.findTop200ByPatientRefInOrderByOccurredAtDesc(inScope);
+        }
+        var out = rows.stream().map(a -> {
             Map<String, Object> m = new java.util.LinkedHashMap<>();
             // id 给前端当列表 key —— 用「时间+动作」当 key 在同一分钟内必然撞车（读审计尤其频繁）
             m.put("id", a.getId());
@@ -166,6 +200,13 @@ public class AdminController {
         m.put("zone", z.getId());
         m.put("windowFrom", from.atZone(z).toString());
         m.put("windowTo", Instant.now().atZone(z).toString());
+        // ★ 数据范围同理必须返回。科室维度统计尚未实现（P3-13），
+        //   所以这里如实标成全院口径，而不是让科室角色把全院数字当成自己的
+        String dept = IdentityContext.scopeDepartment();
+        m.put("scope", dept == null ? "hospital" : "department:" + dept);
+        m.put("scopeNote", dept == null
+                ? "全院口径"
+                : "当前为全院累计口径；科室维度统计尚未实现（见 docs/GUIDE.md 未实现清单）");
         // 今日
         m.put("consultationsToday", consultStartedToday);
         m.put("consultationsFinishedToday", consultFinishedToday);

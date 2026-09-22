@@ -267,7 +267,7 @@ async function send() {
         messages.value.push({ role: 'assistant', text: '没能识别出主诉，请从列表中选择或描述得更具体。' })
       }
     } else {
-      const st = await api.answer(sessionKey, q)
+      const st = await api.answer(patient.value.ref, sessionKey, q)
       applyState(st)
     }
   } catch (e) {
@@ -299,7 +299,7 @@ async function submitAnswer(v?: string) {
   await scrollDown()
   busy.value = true
   try {
-    const st = await api.answer(sessionKey, val)
+    const st = await api.answer(patient.value.ref, sessionKey, val)
     applyState(st)
   } catch (e) {
     messages.value.push({ role: 'assistant', text: '调用失败：' + (e instanceof Error ? e.message : e) })

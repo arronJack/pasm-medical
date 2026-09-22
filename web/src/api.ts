@@ -39,6 +39,32 @@ export interface KbSync {
   cognition?: unknown
 }
 
+/**
+ * 当前身份（`GET /api/auth/me`）。
+ *
+ * ★ 界面**必须**用它决定"能进哪个工作区、显示什么数据范围"，而不是自己猜或读登录时
+ * 随手存的副本 —— 令牌还在、身份可能已经不同。界面据此分支只是体验；
+ * 真正的边界在服务端（患者换 `ref` 读别人记录会被 403）。
+ */
+export interface IdentityView {
+  username: string
+  /** 四角色之一：PATIENT / DOCTOR / DEPT_ADMIN / SUPER_ADMIN */
+  role: string
+  roleLabel: string
+  displayName: string
+  department: string
+  staffId: string
+  /** 患者角色绑定的档案标识（医护为空） */
+  patientRef: string
+  /** 可读文案，如「本科室：发热门诊」/「全院」/「本人（demo-patient-001）」 */
+  scopeLabel: string
+  hospitalWide: boolean
+  clinicalSide: boolean
+  /** 仅供界面禁用按钮；服务端会独立拒绝，不能只靠隐藏 */
+  canWriteKb: boolean
+  canWriteConfig: boolean
+}
+
 const TOKEN_KEY = 'pasm_token'
 
 export function getToken(): string {
@@ -56,9 +82,15 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const t = getToken()
   if (t) headers['Authorization'] = 'Bearer ' + t
   const r = await fetch('/api' + path, { headers, ...init })
-  if (r.status === 401 || r.status === 403) {
+  if (r.status === 401) {
     clearToken()
     throw new Error('登录已失效，请重新登录')
+  }
+  if (r.status === 403) {
+    // ★ 403 与 401 必须分开处理。原先两者一起清令牌，于是"越权被拒"会被当成"会话过期"：
+    //   用户被踢回登录页、重新登录、再次撞上同一个 403 —— 问题是权限，症状却像登录坏了。
+    const body = await r.text()
+    throw new Error('没有权限' + (body ? '：' + body.slice(0, 120) : ''))
   }
   if (!r.ok) {
     const body = await r.text()
@@ -69,9 +101,12 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   login: (username: string, password: string) =>
-    call<{ token: string; role: string; displayName: string }>('/auth/login', {
+    call<IdentityView & { token: string }>('/auth/login', {
       method: 'POST', body: JSON.stringify({ username, password }),
     }),
+
+  /** 当前身份。路由守卫与顶栏都用它，别把登录响应缓存下来当身份用。 */
+  me: () => call<IdentityView>('/auth/me'),
 
   /** 带依据的问答。认知服务会过相关性闸门；无依据时 refused=true（如实显示，不软化） */
   ask: (patientRef: string, question: string, k = 5) =>
@@ -86,12 +121,20 @@ export const api = {
   startConsult: (patientRef: string, chiefComplaint: string) =>
     call<ConsultState>('/consult/start', {
       method: 'POST', body: JSON.stringify({ patientRef, chiefComplaint }) }),
-  answer: (sessionKey: string, value: string) =>
+  /**
+   * 回答当前问题。
+   *
+   * ★ `patientRef` 必传：**服务端把会话按患者隔离**（真正的会话键 = ref + sessionKey）。
+   * 不带它服务端会拒绝 —— 否则全租户共用一条名为 "current" 的会话，
+   * 两个人会串进同一场问诊里（而且采集到的事实会记到别人身上）。
+   */
+  answer: (patientRef: string, sessionKey: string, value: string) =>
     call<ConsultState>('/consult/answer', {
-      method: 'POST', body: JSON.stringify({ sessionKey, value }) }),
-  finishConsult: (sessionKey: string) =>
+      method: 'POST', body: JSON.stringify({ patientRef, sessionKey, value }) }),
+  /** 结束问诊：产出摘要并**落一次就诊**到业务库（后台时间轴与统计的真实来源）。 */
+  finishConsult: (patientRef: string, sessionKey: string) =>
     call<{ ok: boolean; triage: Triage | null; coverage: Record<string, unknown> }>(
-      '/consult/finish', { method: 'POST', body: JSON.stringify({ sessionKey }) }),
+      '/consult/finish', { method: 'POST', body: JSON.stringify({ patientRef, sessionKey }) }),
 
   /** 检验单：识别 → 返回**待确认**结果（未确认不得入病历） */
   parseLab: (patientRef: string, imageUrl: string) =>

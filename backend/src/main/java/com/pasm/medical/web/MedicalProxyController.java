@@ -2,6 +2,7 @@ package com.pasm.medical.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.pasm.medical.cognition.PasmCognitionClient;
+import com.pasm.medical.config.IdentityContext;
 import com.pasm.medical.domain.AiAudit;
 import com.pasm.medical.domain.Encounter;
 import com.pasm.medical.domain.Patient;
@@ -33,6 +34,12 @@ import java.util.Map;
  *   ① 每次认知调用都**留痕到审计库**（append-only，不可变）；
  *   ② 预问诊结束（finish）时把一次就诊**落业务库**（Encounter），
  *      使后台「患者情况 / 时间轴」有真实数据源，而不是前端硬编码。
+ *
+ * ★ <b>本层还负责"资源级"权限判定</b>：{@code SecurityConfig} 只能回答
+ *   "这类角色能不能调这个接口"（按 URL 的粗粒度判定）；而"这个患者能不能看那条 ref"
+ *   URL 里看不出来，必须在这里按身份收窄。
+ *   **所有带 patientRef/ref 的接口一律先过 {@link IdentityContext#scopedRef}** ——
+ *   少了这一步，接口本身是合法的，换个股就看到了别人的病历。
  */
 @RestController
 @RequestMapping("/api")
@@ -52,10 +59,15 @@ public class MedicalProxyController {
     }
 
     @GetMapping("/encounters")
-    public ResponseEntity<Map<String, Object>> encounters(@RequestParam String patientRef) {
-        audit.recordRead(AuditService.currentActor(null), patientRef, "read-timeline",
-                "patientRef=" + patientRef);
-        JsonNode r = cog.get("/api/encounters", Map.of("patientRef", patientRef));
+    public ResponseEntity<Map<String, Object>> encounters(
+            @RequestParam(required = false) String patientRef) {
+        String ref = IdentityContext.scopedRef(patientRef);
+        if (ref == null) {
+            return forbidden(patientRef, "read-timeline");
+        }
+        audit.recordRead(AuditService.currentActor(null), ref, "read-timeline",
+                "patientRef=" + ref);
+        JsonNode r = cog.get("/api/encounters", Map.of("patientRef", ref));
         return ResponseEntity.ok(Map.of(
                 "encounters", r.path("encounters"),
                 "requiresPhysicianConfirmation", true));
@@ -63,10 +75,17 @@ public class MedicalProxyController {
 
     /** 患者档案（业务层视图）：过敏史 / 慢病这类高优先级事实来自结构化字段。 */
     @GetMapping("/patient")
-    public ResponseEntity<Map<String, Object>> patient(@RequestParam String ref) {
+    public ResponseEntity<Map<String, Object>> patient(
+            @RequestParam(required = false) String ref) {
+        // ★ 先收窄再取：ref 空着表示"本人"，写在参数里的别人一律 403
+        String scoped = IdentityContext.scopedRef(ref);
+        if (scoped == null) {
+            return forbidden(ref, "read-patient");
+        }
         // ★ 先记审计再看（含 404 的尝试）—— 见 AuditService.recordRead 的说明
-        audit.recordRead(AuditService.currentActor(null), ref, "read-patient", "ref=" + ref);
-        Patient p = patients.findById(ref);
+        audit.recordRead(AuditService.currentActor(null), scoped, "read-patient",
+                "ref=" + scoped);
+        Patient p = patients.findById(scoped);
         if (p == null) {
             return ResponseEntity.notFound().build();
         }
@@ -82,10 +101,17 @@ public class MedicalProxyController {
 
     /** 该患者的历史就诊（业务库真实数据源，而非前端硬编码）。 */
     @GetMapping("/patient/encounters")
-    public ResponseEntity<List<Map<String, Object>>> patientEncounters(@RequestParam String ref) {
-        audit.recordRead(AuditService.currentActor(null), ref, "read-encounters", "ref=" + ref);
+    public ResponseEntity<List<Map<String, Object>>> patientEncounters(
+            @RequestParam(required = false) String ref) {
+        String scoped = IdentityContext.scopedRef(ref);
+        if (scoped == null) {
+            deny(ref, "read-encounters");
+            return ResponseEntity.status(403).build();
+        }
+        audit.recordRead(AuditService.currentActor(null), scoped, "read-encounters",
+                "ref=" + scoped);
         ZoneId z = ZoneId.systemDefault();
-        List<Map<String, Object>> out = encounters.byPatient(ref).stream().map(e -> {
+        List<Map<String, Object>> out = encounters.byPatient(scoped).stream().map(e -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", String.valueOf(e.getId()));
             m.put("time", e.getOccurredAt().atZone(z).toString().replace('T', ' ').substring(0, 16));
@@ -110,11 +136,16 @@ public class MedicalProxyController {
      */
     @GetMapping("/patient/encounter/{id}")
     public ResponseEntity<Map<String, Object>> patientEncounter(
-            @PathVariable Long id, @RequestParam String ref) {
+            @PathVariable Long id, @RequestParam(required = false) String ref) {
+        String scoped = IdentityContext.scopedRef(ref);
+        if (scoped == null) {
+            // 越权尝试连"用哪个 ref 看哪条就诊"都要留痕
+            return forbidden(ref, "read-encounter");
+        }
         // 归属不符时下面会 404，但"谁试图看过哪条就诊"已经留痕（IDOR 探测正是靠这个发现）
-        audit.recordRead(AuditService.currentActor(null), ref, "read-encounter",
-                "ref=" + ref + ";encounterId=" + id);
-        Encounter e = encounters.findForPatient(ref, id);
+        audit.recordRead(AuditService.currentActor(null), scoped, "read-encounter",
+                "ref=" + scoped + ";encounterId=" + id);
+        Encounter e = encounters.findForPatient(scoped, id);
         if (e == null) {
             return ResponseEntity.notFound().build();
         }
@@ -136,25 +167,34 @@ public class MedicalProxyController {
 
     @PostMapping("/consult/start")
     public ResponseEntity<Map<String, Object>> consultStart(@RequestBody Map<String, Object> body) {
-        String ref = str(body, "patientRef");
+        String ref = IdentityContext.scopedRef(str(body, "patientRef"));
+        if (ref == null) {
+            return forbidden(str(body, "patientRef"), "consult-start");
+        }
         patients.ensureExists(ref);
-        JsonNode r = cog.post("/api/consult/start", body == null ? new HashMap<>() : body);
+        JsonNode r = cog.post("/api/consult/start", forwardBody(body, ref));
         auditForward("/api/consult/start", ref, body, r);
         return wrap(r);
     }
 
     @PostMapping("/consult/answer")
     public ResponseEntity<Map<String, Object>> consultAnswer(@RequestBody Map<String, Object> body) {
-        String ref = str(body, "patientRef");
-        JsonNode r = cog.post("/api/consult/answer", body == null ? new HashMap<>() : body);
+        String ref = IdentityContext.scopedRef(str(body, "patientRef"));
+        if (ref == null) {
+            return forbidden(str(body, "patientRef"), "consult-answer");
+        }
+        JsonNode r = cog.post("/api/consult/answer", forwardBody(body, ref));
         auditForward("/api/consult/answer", ref, body, r);
         return wrap(r);
     }
 
     @PostMapping("/consult/finish")
     public ResponseEntity<Map<String, Object>> consultFinish(@RequestBody Map<String, Object> body) {
-        String ref = str(body, "patientRef");
-        JsonNode r = cog.post("/api/consult/finish", body == null ? new HashMap<>() : body);
+        String ref = IdentityContext.scopedRef(str(body, "patientRef"));
+        if (ref == null) {
+            return forbidden(str(body, "patientRef"), "consult-finish");
+        }
+        JsonNode r = cog.post("/api/consult/finish", forwardBody(body, ref));
         // 预问诊结束：落一次就诊到业务库（时间轴 / 后台的真实数据源）
         if (ref != null && !ref.isBlank()) {
             try {
@@ -186,29 +226,75 @@ public class MedicalProxyController {
     /** 检验单识别：返回**待确认**结果 —— 未确认不会写入病历。 */
     @PostMapping("/lab/parse")
     public ResponseEntity<Map<String, Object>> labParse(@RequestBody Map<String, Object> body) {
-        String ref = str(body, "patientRef");
-        JsonNode r = cog.post("/api/lab/parse", body == null ? new HashMap<>() : body);
+        String ref = IdentityContext.scopedRef(str(body, "patientRef"));
+        if (ref == null) {
+            return forbidden(str(body, "patientRef"), "lab-parse");
+        }
+        JsonNode r = cog.post("/api/lab/parse", forwardBody(body, ref));
         auditForward("/api/lab/parse", ref, body, r);
         return wrap(r);
     }
 
     @PostMapping("/lab/confirm")
     public ResponseEntity<Map<String, Object>> labConfirm(@RequestBody Map<String, Object> body) {
-        String ref = str(body, "patientRef");
-        JsonNode r = cog.post("/api/lab/confirm", body == null ? new HashMap<>() : body);
+        String ref = IdentityContext.scopedRef(str(body, "patientRef"));
+        if (ref == null) {
+            return forbidden(str(body, "patientRef"), "lab-confirm");
+        }
+        JsonNode r = cog.post("/api/lab/confirm", forwardBody(body, ref));
         auditForward("/api/lab/confirm", ref, body, r);
         return wrap(r);
     }
 
     @PostMapping("/critical-fact")
     public ResponseEntity<Map<String, Object>> criticalFact(@RequestBody Map<String, Object> body) {
-        String ref = str(body, "patientRef");
-        JsonNode r = cog.post("/api/critical-fact", body == null ? new HashMap<>() : body);
+        String ref = IdentityContext.scopedRef(str(body, "patientRef"));
+        if (ref == null) {
+            return forbidden(str(body, "patientRef"), "critical-fact");
+        }
+        JsonNode r = cog.post("/api/critical-fact", forwardBody(body, ref));
         auditForward("/api/critical-fact", ref, body, r);
         return wrap(r);
     }
 
     // ------------------------------------------------------------ 内部
+
+    /**
+     * 越权留痕 + 403。
+     *
+     * <p>★ 越权尝试**必须留痕**，而且要在拒绝之前先记：它是数据泄露的前兆信号，
+     * 也是 IDOR 探测唯一的证据来源。只返回 403 而不记，等于"挡住了但什么都没看见"。
+     */
+    private ResponseEntity<Map<String, Object>> forbidden(String requested, String action) {
+        deny(requested, action);
+        return ResponseEntity.status(403).body(Map.of(
+                "error", "无权访问该患者的记录",
+                "scope", IdentityContext.current().scopeLabel()));
+    }
+
+    /** 只留痕不返回 —— 给返回类型不是 Map 的接口用。 */
+    private void deny(String requested, String action) {
+        try {
+            audit.recordRead(AuditService.currentActor(null), requested, "denied-" + action,
+                    "requestedRef=" + requested
+                            + ";scope=" + IdentityContext.current().scopeLabel());
+        } catch (Exception ignored) {
+            // 留痕失败不能反过来把 403 变成 500 —— 拒绝本身必须照常生效
+        }
+    }
+
+    /**
+     * 转发体的 patientRef **强制覆盖**为已收窄的 ref。
+     *
+     * <p>★ 为什么是"覆盖"而不是"校验后原样透传"：患者可以不传 ref（等于本人），
+     * 原样透传就会让认知侧收到空 ref；而校验通过又原样透传，在大小写/空白不一致时
+     * 会把请求参数直接带进下游存储。
+     */
+    private Map<String, Object> forwardBody(Map<String, Object> body, String ref) {
+        Map<String, Object> out = body == null ? new HashMap<>() : new HashMap<>(body);
+        out.put("patientRef", ref);
+        return out;
+    }
 
     private ResponseEntity<Map<String, Object>> wrap(JsonNode r) {
         Map<String, Object> out = new HashMap<>();

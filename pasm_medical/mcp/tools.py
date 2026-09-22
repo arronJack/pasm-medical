@@ -141,13 +141,17 @@ def tool_answer_consult(args: Dict[str, Any], svc) -> Dict[str, Any]:
     value = _s(args, "value")
     by_key = _b(args, "by_key", False)
     qkey = _s(args, "question_key")
+    patient_ref = _s(args, "patient_ref")
     if by_key:
-        return svc.answer_consult(qkey, value, session_key, by_key=True)
-    return svc.answer_consult(value, "", session_key, by_key=False)
+        return svc.answer_consult(qkey, value, session_key, by_key=True,
+                                  patient_ref=patient_ref)
+    return svc.answer_consult(value, "", session_key, by_key=False,
+                              patient_ref=patient_ref)
 
 
 def tool_finish_consult(args: Dict[str, Any], svc) -> Dict[str, Any]:
-    return svc.finish_consult(_s(args, "session_key"))
+    return svc.finish_consult(_s(args, "session_key"),
+                              patient_ref=_s(args, "patient_ref"))
 
 
 def tool_check_herbs(args: Dict[str, Any], svc) -> Dict[str, Any]:
@@ -276,15 +280,18 @@ TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "med_answer_consult",
-        "description": "回答当前预问诊问题。by_key=true 时 value 为问题 key 的回答。",
-        "inputSchema": _schema(["session_key"], {
-            "session_key": _ST, "value": _ST, "by_key": _B, "question_key": _ST}),
+        "description": "回答当前预问诊问题。必须带 patient_ref —— 会话按患者隔离，"
+                       "缺了它就无法确定这是谁的问诊。by_key=true 时 value 为问题 key 的回答。",
+        "inputSchema": _schema(["patient_ref", "session_key"], {
+            "patient_ref": _ST, "session_key": _ST, "value": _ST,
+            "by_key": _B, "question_key": _ST}),
         "fn": tool_answer_consult,
     },
     {
         "name": "med_finish_consult",
-        "description": "结束问诊，产出《预问诊摘要》并写入认知记忆。",
-        "inputSchema": _schema(["session_key"], {"session_key": _ST}),
+        "description": "结束问诊，产出《预问诊摘要》并写入认知记忆。必须带 patient_ref。",
+        "inputSchema": _schema(["patient_ref", "session_key"], {
+            "patient_ref": _ST, "session_key": _ST}),
         "fn": tool_finish_consult,
     },
     {

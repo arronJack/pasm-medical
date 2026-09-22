@@ -15,26 +15,38 @@ import java.util.List;
 /**
  * 安全配置。
  *
- * 三条设计：
- *  1. **无状态**（不用 session）：前端用 Bearer 令牌，服务端不存会话。
- *  2. actuator/health 与 api/auth/login 放行（不加粗、避免出现连续星号斜杠），
- *     其余 api 路径一律要令牌；**`/api/admin/**` 额外要求 ROLE_STAFF**。
- *  3. **CORS 只允许本机前端**（开发期）；生产要改成真实域名白名单，
- *     不要用 "*" —— 带凭证的跨域用通配符等于不设防。
+ * <p>三条设计：
+ * <ol>
+ *   <li><b>无状态</b>（不用 session）：前端用 Bearer 令牌，服务端不存会话。</li>
+ *   <li><b>按"能做什么"分级授权</b>，而不是"登录了就能看"（见下表）。</li>
+ *   <li><b>CORS 只允许本机前端</b>（开发期）；生产要改成真实域名白名单，
+ *       不要用 "*" —— 带凭证的跨域用通配符等于不设防。</li>
+ * </ol>
  *
- * <p>★ 为什么后台必须单独限 {@code ROLE_STAFF}，而不是"登录了就能看"：
- * {@code /api/admin/**} 能读出**全院**患者的姓名 / 过敏史 / 慢病，还能改
- * 「大模型指向何处」（决定患者数据会不会出网）。若只判"已认证"，
- * 一个患者令牌就能拿到全院数据 —— 这正是最小权限原则要挡的事。
+ * <table>
+ *   <caption>授权矩阵</caption>
+ *   <tr><th>路径</th><th>要求</th><th>为什么</th></tr>
+ *   <tr><td>{@code /actuator/health}、{@code /api/auth/login}</td>
+ *       <td>放行</td><td>探活与登录本身不能要令牌</td></tr>
+ *   <tr><td>{@code /api/admin/config}</td><td>仅超管</td>
+ *       <td>它决定「大模型指向何处」，即患者数据会不会出网 —— 这不是科室级权限</td></tr>
+ *   <tr><td>{@code /api/admin/kb/**}</td><td>仅超管</td>
+ *       <td>资料库是全院答案的依据；当前没有科室维度，给科室写权限 = 一个科室改全院</td></tr>
+ *   <tr><td>{@code /api/admin/**}（其余，含读）</td><td>医护侧</td>
+ *       <td>能读院内的姓名/过敏史/慢病 → 患者令牌必须 403（最小权限）</td></tr>
+ *   <tr><td>其余 {@code /api/**}</td><td>已认证</td>
+ *       <td>★ 但"已认证"**不等于**"能看任意患者"：带 {@code ref} 的接口一律再经
+ *           {@link IdentityContext#scopedRef} 收窄到身份允许的范围</td></tr>
+ * </table>
  *
- * <p>⚠️ 尚未做到的一条（如实标注，不假装已解决）：{@code /api/patient/**} 目前只校验
- * 「已认证」，患者令牌理论上可以换 {@code ref} 去读别人的就诊记录。
- * 要修必须先有"令牌 → 该患者 ref"的映射，而当前演示账号没有这个映射
- * （用户名 {@code patient} 与 ref {@code demo-patient-001} 对不上）。
- * 生产接 OIDC 时应把 ref 绑定进令牌声明（claim），届时在过滤器里强制覆盖请求参数即可。
+ * <p>★ <b>两层判定的分工必须说清楚</b>：{@code authorizeHttpRequests} 只能回答
+ * "这类角色能不能调用这个接口"（粗粒度，按 URL）；而"这个患者能不能看那个 `ref`"
+ * 是**资源级**判定，URL 里看不出来，必须在接口里按身份收窄。
+ * 只做第一层就是本系统之前的缺口：患者令牌本身合法，换个股就看到了别人的病历。
  *
- * <p>⚠️ 当前是**开发骨架**：令牌是进程内的不透明串。生产必须换成真正方案
- *    （OAuth2/OIDC 或签名 JWT + 刷新机制），并接入医院统一身份。
+ * <p>⚠️ 当前仍是**开发骨架**：令牌是进程内的不透明串、账号是写死的演示账号。
+ * 生产必须换成真正方案（OAuth2/OIDC 或签名 JWT + 刷新机制）并接入医院统一身份；
+ * 接入点已被收敛到 {@link TokenService}（把 {@code Identity} 改成从令牌 claim 解析即可）。
  */
 @Configuration
 public class SecurityConfig {
@@ -53,8 +65,12 @@ public class SecurityConfig {
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/actuator/health", "/api/auth/login").permitAll()
-                // 后台：能读全院患者、能改模型指向 —— 必须医护角色，患者令牌一律 403
-                .requestMatchers("/api/admin/**").hasRole("STAFF")
+                // ★ 顺序敏感：更具体的规则必须写在前面，否则会被下面的通配吃掉
+                .requestMatchers("/api/admin/config", "/api/admin/kb/**")
+                    .hasRole("SUPER_ADMIN")
+                // 后台其余（患者列表 / 审计 / 统计）：医护侧可读，范围在接口内按科室收窄
+                .requestMatchers("/api/admin/**")
+                    .hasAnyRole("DOCTOR", "DEPT_ADMIN", "SUPER_ADMIN")
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().authenticated())
             .addFilterBefore(new TokenAuthFilter(tokens),

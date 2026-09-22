@@ -61,6 +61,30 @@ public class DemoDataSeeder {
             e2.setTriageUrgency("routine");
             e2.setSummaryText("主诉：发热 3 天；判断：上呼吸道感染；处置：对症处理，观察");
             encounters.save(e2);
+
+            // ★ 第二位演示患者是**刻意的**：他的就诊科室与前一位没有交集，
+            //   这样"医护只看本科室"这条数据范围规则在界面上**看得见效果**
+            //   （发热门诊的医护只应看到 demo-patient-001，看不到这一位）。
+            //   只有一位患者时，科室过滤与全院不过滤的结果一样，测不出区别 —— 那等于没测。
+            Patient p2 = new Patient();
+            p2.setRef("demo-patient-002");
+            p2.setName("示例患者乙");
+            p2.setSex("男");
+            p2.setAge(58);
+            p2.setAllergy("");
+            p2.setChronic("2 型糖尿病");
+            patients.save(p2);
+
+            Encounter e3 = new Encounter();
+            e3.setPatientRef("demo-patient-002");
+            e3.setOccurredAt(Instant.parse("2026-09-15T09:10:00Z"));
+            e3.setDepartment("骨科");
+            e3.setChiefComplaint("右膝疼痛 1 周");
+            e3.setAssessment("考虑退行性改变，建议进一步检查");
+            e3.setPlan("骨科门诊复诊，必要时影像检查");
+            e3.setTriageUrgency("routine");
+            e3.setSummaryText("主诉：右膝疼痛 1 周；判断：考虑退行性改变，建议进一步检查；处置：骨科门诊复诊");
+            encounters.save(e3);
         };
     }
 }

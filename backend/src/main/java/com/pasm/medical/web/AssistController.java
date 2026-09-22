@@ -2,6 +2,7 @@ package com.pasm.medical.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.pasm.medical.cognition.PasmCognitionClient;
+import com.pasm.medical.config.IdentityContext;
 import com.pasm.medical.domain.AiAudit;
 import com.pasm.medical.service.AuditService;
 import com.pasm.medical.service.KnowledgeDocService;
@@ -55,13 +56,16 @@ public class AssistController {
      */
     @PostMapping("/ask")
     public ResponseEntity<Map<String, Object>> ask(@RequestBody AskRequest req) {
-        if (req.patientRef() == null || req.patientRef().isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "patientRef 不能为空"));
-        }
         if (req.question() == null || req.question().isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "question 不能为空"));
         }
-        patients.ensureExists(req.patientRef());
+        // ★ 先按身份收窄：患者可以不传 patientRef（等于本人），写了别人则 403。
+        //   这里**不再**把"patientRef 为空"当 400 —— 那是要求前端替患者重复声明一遍身份。
+        String ref = IdentityContext.scopedRef(req.patientRef());
+        if (ref == null) {
+            return forbidden(req.patientRef(), "ask");
+        }
+        patients.ensureExists(ref);
         int k = req.k() <= 0 ? 5 : req.k();
         // ★ 走医疗侧的「带闸门问答」(/api/answer)，而不是框架的 /api/cog/recall：
         //   ① 那条路只召回**患者记忆**、不含机构资料库 → 资料库对问答毫无影响（摆设）；
@@ -69,7 +73,7 @@ public class AssistController {
         //   docKeys 传业务库里"当前生效"的资料键：即使认知侧清理失败，
         //   已下架的资料也不会被当成依据（第二道保险）。
         JsonNode r = cognition.post("/api/answer", Map.of(
-                "patientRef", req.patientRef(),
+                "patientRef", ref,
                 "question", req.question(),
                 "k", k,
                 "docKeys", kb.activeKeys()));
@@ -86,9 +90,9 @@ public class AssistController {
             }
         }
         boolean refused = r.path("refused").asBoolean(false);
-        auditAsk(req.patientRef(), req.question(), sources.size(), refused);
+        auditAsk(ref, req.question(), sources.size(), refused);
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("patientRef", req.patientRef());
+        out.put("patientRef", ref);
         out.put("question", req.question());
         // 保持 evidence.hits 的形状（既有前端契约），另外单独给出 sources / refused
         out.put("evidence", Map.of("hits", sources));
@@ -105,22 +109,31 @@ public class AssistController {
 
     /** 认知上下文（只读）：前端把 recalled 渲染成"系统记得的事"，供医生核对与纠错。 */
     @GetMapping("/context")
-    public ResponseEntity<Map<String, Object>> context(@RequestParam String patientRef,
-                                                      @RequestParam String query,
-                                                      @RequestParam(defaultValue = "5") int k) {
+    public ResponseEntity<Map<String, Object>> context(
+            @RequestParam(required = false) String patientRef,
+            @RequestParam String query,
+            @RequestParam(defaultValue = "5") int k) {
+        String ref = IdentityContext.scopedRef(patientRef);
+        if (ref == null) {
+            return forbidden(patientRef, "context");
+        }
         return ResponseEntity.ok(Map.of(
-                "context", cognition.context(patientRef, query, k),
+                "context", cognition.context(ref, query, k),
                 "requiresPhysicianConfirmation", true));
     }
 
     /** 登记关键事实（过敏史 / 危急事件）。前端应在"保存病历"时同步调用。 */
     @PostMapping("/critical-fact")
     public ResponseEntity<Map<String, Object>> criticalFact(@RequestBody CriticalFactRequest req) {
+        String ref = IdentityContext.scopedRef(req.patientRef());
+        if (ref == null) {
+            return forbidden(req.patientRef(), "critical-fact");
+        }
         // salience=5：关键事实绝不能被后续闲聊挤出上下文（再次处方时可能致命）
-        JsonNode r = cognition.observe(req.patientRef(), req.title(), req.detail(),
+        JsonNode r = cognition.observe(ref, req.title(), req.detail(),
                 req.tags() == null ? List.of() : req.tags(), 5);
-        patients.recordFacts(req.patientRef(), req.title(), null);
-        auditAct(req.patientRef(), "critical-fact", 1, "cognition-observe",
+        patients.recordFacts(ref, req.title(), null);
+        auditAct(ref, "critical-fact", 1, "cognition-observe",
                 "title=" + req.title());
         return ResponseEntity.ok(Map.of("result", r, "salience", 5));
     }
@@ -133,9 +146,13 @@ public class AssistController {
      */
     @PostMapping("/feedback")
     public ResponseEntity<Map<String, Object>> feedback(@RequestBody FeedbackRequest req) {
-        JsonNode r = cognition.feedback(req.patientRef(), req.kind(), req.action());
+        String ref = IdentityContext.scopedRef(req.patientRef());
+        if (ref == null) {
+            return forbidden(req.patientRef(), "feedback");
+        }
+        JsonNode r = cognition.feedback(ref, req.kind(), req.action());
         String action = "feedback-" + (req.action() == null ? "other" : req.action());
-        auditAct(req.patientRef(), action, null, "cognition-feedback",
+        auditAct(ref, action, null, "cognition-feedback",
                 "kind=" + req.kind() + ";action=" + req.action());
         return ResponseEntity.ok(Map.of("result", r));
     }
@@ -144,6 +161,24 @@ public class AssistController {
     @GetMapping("/cognition-health")
     public ResponseEntity<Map<String, Object>> cognitionHealth() {
         return ResponseEntity.ok(Map.of("available", cognition.isAvailable()));
+    }
+
+    /**
+     * 越权留痕 + 403（与 {@code MedicalProxyController} 同一套语义）。
+     *
+     * <p>★ 越权尝试要**先记再拒**：它是数据泄露的前兆，也是 IDOR 探测的唯一证据。
+     */
+    private ResponseEntity<Map<String, Object>> forbidden(String requested, String action) {
+        try {
+            audit.recordRead(AuditService.currentActor(null), requested, "denied-" + action,
+                    "requestedRef=" + requested
+                            + ";scope=" + IdentityContext.current().scopeLabel());
+        } catch (Exception ignored) {
+            // 留痕失败不能把 403 变成 500 —— 拒绝必须照常生效
+        }
+        return ResponseEntity.status(403).body(Map.of(
+                "error", "无权访问该患者的记录",
+                "scope", IdentityContext.current().scopeLabel()));
     }
 
     // ------------------------------------------------------------ 审计埋点

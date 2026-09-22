@@ -6,12 +6,16 @@
         <span>智能预问诊</span>
         <span class="tag">辅助工具 · 非诊断</span>
       </div>
-      <nav v-if="logged">
-        <RouterLink to="/consult">问诊</RouterLink>
-        <RouterLink to="/admin">后台</RouterLink>
+      <nav v-if="me">
+        <RouterLink v-if="side === 'patient'" to="/consult">问诊</RouterLink>
+        <RouterLink v-else to="/admin">后台</RouterLink>
       </nav>
       <div class="spacer" />
-      <span v-if="logged" class="who">{{ who }}</span>
+      <span v-if="me" class="who">
+        {{ me.displayName || me.username }}
+        <em class="chip-role">{{ me.roleLabel }}</em>
+        <em class="chip-scope">{{ me.scopeLabel }}</em>
+      </span>
       <button v-if="logged" class="link" @click="logout">退出</button>
     </header>
     <main><RouterView /></main>
@@ -19,9 +23,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRouter } from 'vue-router'
-import { clearToken, getToken } from './api'
+import { clearToken, getToken, type IdentityView } from './api'
+import { ensureIdentity, forgetIdentity, sideOf } from './identity'
 
 const router = useRouter()
 const tick = ref(0)
@@ -29,11 +34,24 @@ const logged = computed(() => {
   void tick.value
   return !!getToken()
 })
-const who = computed(() => localStorage.getItem('pasm_display') || '')
+
+/** 身份只有一个真相源：服务端 /api/auth/me（见 identity.ts 的说明）。 */
+const me = ref<IdentityView | null>(null)
+const side = computed(() => sideOf(me.value))
+
+async function syncIdentity() {
+  me.value = await ensureIdentity()
+  tick.value++
+}
+
+onMounted(syncIdentity)
+// 登录/换身份后路由会变，这里跟着刷新一次，避免顶栏显示上一个账号
+router.afterEach(syncIdentity)
 
 function logout() {
   clearToken()
-  localStorage.removeItem('pasm_display')
+  forgetIdentity()
+  me.value = null
   tick.value++
   router.push('/login')
 }
@@ -93,7 +111,16 @@ nav a {
 }
 nav a.router-link-active { background: #eef4f6; color: var(--primary-dark); }
 .spacer { flex: 1; }
-.who { color: var(--text-2); font-size: 13px; }
+.who { color: var(--text-2); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.chip-role {
+  font-style: normal; font-size: 12px; padding: 1px 7px; border-radius: 5px;
+  background: #eef4f6; color: var(--primary-dark);
+}
+/* ★ 数据范围必须一直看得见：否则"本科室的数字"会被当成"全院的数字" */
+.chip-scope {
+  font-style: normal; font-size: 12px; padding: 1px 7px; border-radius: 5px;
+  background: var(--bg); color: var(--text-3); border: 1px solid var(--line);
+}
 .link { border: 0; background: none; color: var(--text-3); font-size: 13px; padding: 4px 6px; }
 .link:hover { color: var(--danger-fg); }
 main { flex: 1; min-height: 0; }
