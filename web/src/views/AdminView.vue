@@ -31,19 +31,65 @@
       <!-- 资料库 -->
       <template v-else-if="tab === 'kb'">
         <h2>资料库</h2>
+        <p class="hint">
+          资料是<strong>回答依据</strong>：问题词元必须落在<strong>标题或标签</strong>上，这条资料才会被引用；
+          正文不参与该判定（避免"正文里偶然提到"造成的答非所问）。<strong>下架 = 不再作为任何回答的依据</strong>。
+        </p>
+
+        <div class="kbf">
+          <input v-model.trim="kbForm.docKey" placeholder="资料键（留空自动生成；填已有键 = 编辑）" />
+          <input v-model.trim="kbForm.title" placeholder="标题（必填）" />
+          <input v-model.trim="kbForm.tags" placeholder="标签，逗号分隔 —— 相关性闸门的命中面" />
+          <input v-model.trim="kbForm.version" placeholder="版本，如 2026.09" />
+          <input v-model.trim="kbForm.reviewer" placeholder="复核人（留空 = 未复核）" />
+          <textarea v-model="kbForm.content" rows="3" placeholder="正文"></textarea>
+          <div class="kbf-actions">
+            <button class="primary" :disabled="kbBusy || !kbForm.title" @click="saveKb()">
+              {{ kbForm.docKey ? '保存修改' : '新增资料' }}
+            </button>
+            <button v-if="kbForm.docKey" @click="resetKbForm()">取消编辑</button>
+            <span v-if="kbMsg" class="kbmsg" :class="kbBad ? 'bad' : 'ok'">{{ kbMsg }}</span>
+          </div>
+        </div>
+
         <table>
-          <thead><tr><th>来源</th><th>类型</th><th>版本</th><th>复核人</th><th>状态</th></tr></thead>
+          <thead>
+            <tr>
+              <th>标题</th><th>标签</th><th>版本</th><th>复核人</th><th>状态</th><th>更新时间</th><th>操作</th>
+            </tr>
+          </thead>
           <tbody>
-            <tr v-for="k in kb" :key="k.name">
-              <td>{{ k.name }}</td><td>{{ k.kind }}</td><td class="mono">{{ k.ver }}</td>
-              <td>{{ k.reviewer }}</td>
-              <td><span class="badge" :class="k.ok ? 'ok' : 'warn'">{{ k.ok ? '已复核' : '待复核' }}</span></td>
+            <tr v-for="d in kbDocs" :key="d.docKey">
+              <td>{{ d.title }}</td>
+              <td class="snap" :title="d.tags.join(' / ')">{{ d.tags.join(' / ') || '—' }}</td>
+              <td class="mono">{{ d.version || '—' }}</td>
+              <td>{{ d.reviewed ? d.reviewer : '待复核' }}</td>
+              <td>
+                <span class="badge" :class="d.status === 'active' ? 'ok' : 'warn'">
+                  {{ d.status === 'active' ? '生效' : '已下架' }}
+                </span>
+              </td>
+              <td class="mono">{{ d.updatedAt }}</td>
+              <td class="ops">
+                <button @click="editKb(d)">编辑</button>
+                <button @click="toggleKb(d)">{{ d.status === 'active' ? '下架' : '上架' }}</button>
+                <button @click="delKb(d)">删除</button>
+              </td>
+            </tr>
+            <tr v-if="!kbDocs.length">
+              <td colspan="7" class="empty">
+                资料库是空的。空库意味着<strong>所有</strong>带依据问答都会拒答 —— 闸门找不到任何依据。
+              </td>
             </tr>
           </tbody>
         </table>
+        <p class="hint">
+          生效 {{ kbActive }} 条 · 下架 {{ kbInactive }} 条
+          <button class="mini" :disabled="kbBusy" @click="syncKb()">重新同步到认知侧</button>
+        </p>
         <p class="hint warn">
-          ⚠ 规则表（中药配伍禁忌 / 妊娠禁忌 / 毒性剂量上限）在投产前**必须由临床药师逐条复核**
-          并与本机构前置审核规则对齐 —— 上表中的「复核人」为空即表示尚未复核。
+          ⚠ 规则表（中药配伍禁忌 / 妊娠禁忌 / 毒性剂量上限）投产前**必须由临床药师逐条复核**
+          并与本机构前置审核规则对齐 —— 表中「复核人」显示"待复核"即表示尚未复核。
         </p>
       </template>
 
@@ -175,7 +221,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { api, type AdminConfigView, type DesiredConfig } from '../api'
+import { api, type AdminConfigView, type DesiredConfig, type KbDoc } from '../api'
 
 const tabs = [
   { id: 'patients', name: '患者情况' },
@@ -207,14 +253,112 @@ const audit = ref<AuditRow[]>([])
 const loading = ref(false)
 const err = ref('')
 
-// 资料库：固定的"规则表复核"清单（上线前必须由临床药师逐条复核），非动态数据，保留为静态参考。
-const kb = [
-  { name: '临床指南汇编', kind: '西医', ver: '2026.09', reviewer: '（待临床顾问）', ok: false },
-  { name: '中药配伍禁忌表（十八反/十九畏）', kind: '中医·规则', ver: '2026.09-starter', reviewer: '', ok: false },
-  { name: '毒性药材剂量上限', kind: '中医·规则', ver: '2026.09-starter', reviewer: '', ok: false },
-  { name: '检验项目字典', kind: '术语', ver: '2026.09', reviewer: '', ok: false },
-  { name: '红旗症状规则表', kind: '规则', ver: '2026.09-starter', reviewer: '', ok: false },
-]
+// ── 资料库：真实数据（业务库是权威）
+//  ★ 以前这里是 5 行**硬编码的"待复核清单"**，看着像有资料、其实库里一条也没有 ——
+//  而资料库是空的时候，所有带依据问答都会拒答（闸门找不到依据）。改真数据后，
+//  "能不能答"就取决于这里有没有维护资料，这是可观察的。
+const kbDocs = ref<KbDoc[]>([])
+const kbActive = ref(0)
+const kbInactive = ref(0)
+const kbBusy = ref(false)
+const kbMsg = ref('')
+const kbBad = ref(false)
+const emptyKbForm = () => ({ docKey: '', title: '', tags: '', content: '', version: '', reviewer: '' })
+const kbForm = ref(emptyKbForm())
+
+async function loadKb() {
+  try {
+    const r = await api.adminKb()
+    kbDocs.value = r.docs
+    kbActive.value = r.active
+    kbInactive.value = r.inactive
+  } catch (e) {
+    kbMsg.value = e instanceof Error ? e.message : String(e)
+    kbBad.value = true
+  }
+}
+
+function clearKbForm() { kbForm.value = emptyKbForm() }
+
+function editKb(d: KbDoc) {
+  kbForm.value = {
+    docKey: d.docKey, title: d.title, tags: d.tags.join(','),
+    content: d.content, version: d.version, reviewer: d.reviewer,
+  }
+  kbMsg.value = ''
+}
+
+function resetKbForm() { clearKbForm(); kbMsg.value = '' }
+
+/** 同步结果如实回报：`synced=false` = 库里改了但检索侧没生效（漂移），绝不能显示成成功。 */
+function noteSync(sync: { synced?: boolean; error?: string } | undefined, okMsg: string) {
+  if (sync && sync.synced === false) {
+    kbBad.value = true
+    kbMsg.value = okMsg + '；但同步检索副本失败：' + (sync.error || '认知服务不可达')
+  } else {
+    kbBad.value = false
+    kbMsg.value = okMsg
+  }
+}
+
+async function saveKb() {
+  kbBusy.value = true
+  const editing = !!kbForm.value.docKey
+  try {
+    const r = await api.adminKbSave({ ...kbForm.value })
+    clearKbForm()
+    noteSync(r.sync, editing ? '已保存并同步' : '已新增并同步')
+    await loadKb()
+  } catch (e) {
+    kbBad.value = true
+    kbMsg.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    kbBusy.value = false
+  }
+}
+
+async function toggleKb(d: KbDoc) {
+  kbBusy.value = true
+  const toActive = d.status !== 'active'
+  try {
+    const r = await api.adminKbStatus(d.docKey, toActive)
+    noteSync(r.sync, toActive ? '已上架并同步' : '已下架并同步（下架的资料不再作为回答依据）')
+    await loadKb()
+  } catch (e) {
+    kbBad.value = true
+    kbMsg.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    kbBusy.value = false
+  }
+}
+
+async function delKb(d: KbDoc) {
+  kbBusy.value = true
+  try {
+    const r = await api.adminKbDelete(d.docKey)
+    noteSync(r.sync, '已删除并同步')
+    await loadKb()
+  } catch (e) {
+    kbBad.value = true
+    kbMsg.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    kbBusy.value = false
+  }
+}
+
+async function syncKb() {
+  kbBusy.value = true
+  try {
+    const s = await api.adminKbSync()
+    noteSync(s, '已重新同步 ' + (s.expected ?? 0) + ' 条生效资料')
+    await loadKb()
+  } catch (e) {
+    kbBad.value = true
+    kbMsg.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    kbBusy.value = false
+  }
+}
 
 // ── 对接设置：真实读写业务层（不再是前端占位）
 const cfg = ref<DesiredConfig>({ ocr: 'none', lis: 'off', llm: 'null', model: '', baseUrl: '' })
@@ -313,7 +457,7 @@ async function load() {
   } finally {
     loading.value = false
   }
-  await loadConfig()
+  await Promise.all([loadConfig(), loadKb()])
 }
 
 onMounted(load)
@@ -343,6 +487,26 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
 .badge.emergency { background: var(--danger-bg); color: var(--danger-fg); }
 .badge.routine, .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
 .badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+/* 资料库表单：一行一个字段，窄屏自动折行 */
+.kbf { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+.kbf input { flex: 1 1 190px; min-width: 150px; padding: 7px 9px; font-size: 13px;
+  border: 1px solid var(--line-strong); border-radius: 7px; background: #fff; outline: none; }
+.kbf textarea { flex: 1 1 100%; padding: 7px 9px; font-size: 13px; font-family: inherit;
+  border: 1px solid var(--line-strong); border-radius: 7px; background: #fff; outline: none; resize: vertical; }
+.kbf input:focus, .kbf textarea:focus { border-color: var(--primary); }
+.kbf-actions { flex: 1 1 100%; display: flex; align-items: center; gap: 10px; }
+.kbf button { padding: 7px 14px; font-size: 13px; border-radius: 7px; border: 1px solid var(--line-strong); background: #fff; cursor: pointer; }
+.kbf button.primary { border: 0; background: var(--primary); color: #fff; }
+.kbf button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.kbmsg { font-size: 12px; }
+.kbmsg.ok { color: var(--ok-fg); }
+.kbmsg.bad { color: var(--danger-fg); }
+.ops button { padding: 3px 9px; margin-right: 4px; font-size: 12px; border-radius: 6px;
+  border: 1px solid var(--line-strong); background: #fff; cursor: pointer; }
+.ops button:hover { border-color: var(--primary); color: var(--primary); }
+.mini { margin-left: 8px; padding: 3px 10px; font-size: 12px; border-radius: 6px;
+  border: 1px solid var(--line-strong); background: #fff; cursor: pointer; }
+.empty { padding: 18px; text-align: center; color: var(--text-3); font-size: 13px; }
 .hint { margin-top: 16px; font-size: 12px; color: var(--text-3); line-height: 1.8; }
 .hint.warn { color: var(--warn-fg); background: var(--warn-bg); padding: 10px 12px; border-radius: 8px; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }

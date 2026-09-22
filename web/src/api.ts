@@ -6,7 +6,38 @@
  * 一旦下发到浏览器，等于把"写记忆、改人格"的权限公开。
  */
 
-export interface Evidence { title: string; brief?: string; tags?: string[] }
+export interface Evidence {
+  title: string
+  brief?: string
+  tags?: string[]
+  /** `doc` = 来自机构资料库；`memory` = 来自该患者的档案/记忆。医生要分得清依据来自哪一侧。 */
+  kind?: 'doc' | 'memory'
+  docKey?: string
+  salience?: number
+}
+
+/** 资料库条目（业务库视图）。`tags` 是相关性闸门的命中面，不是装饰。 */
+export interface KbDoc {
+  docKey: string
+  title: string
+  content: string
+  tags: string[]
+  department: string
+  status: 'active' | 'inactive'
+  version: string
+  reviewer: string
+  reviewed: boolean
+  updatedAt: string
+  updatedBy: string
+}
+
+/** 资料库 → 认知侧检索副本的同步结果。`synced=false` = 库里改了但检索侧没生效（漂移）。 */
+export interface KbSync {
+  expected: number
+  synced: boolean
+  error?: string
+  cognition?: unknown
+}
 
 const TOKEN_KEY = 'pasm_token'
 
@@ -115,6 +146,34 @@ export const api = {
       inputSnapshot: string
       inputTruncated: boolean
     }[]>('/admin/audit'),
+
+  /**
+   * 后台：资料库（**业务库是权威**，认知侧只放一份"当前生效资料"的检索副本）。
+   *
+   * ★ `tags` 是**相关性闸门的命中面**（问题词元必须落在标题或标签上才算依据），
+   * 所以它是必填的语义字段，不是装饰。`sync.synced=false` 表示"库里改了、检索侧没生效"，
+   * 界面必须如实显示这种漂移 —— 否则会以为改了资料就有用。
+   */
+  adminKb: () =>
+    call<{ docs: KbDoc[]; active: number; inactive: number; note: string }>('/admin/kb'),
+
+  adminKbSave: (body: {
+    docKey?: string; title: string; content: string; tags: string
+    department?: string; version?: string; reviewer?: string
+  }) => call<{ doc: KbDoc; sync: KbSync }>('/admin/kb', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+
+  adminKbStatus: (docKey: string, active: boolean) =>
+    call<{ doc: KbDoc; sync: KbSync }>(
+      '/admin/kb/' + encodeURIComponent(docKey) + '/status',
+      { method: 'POST', body: JSON.stringify({ active }) }),
+
+  adminKbDelete: (docKey: string) =>
+    call<{ deleted: boolean; sync: KbSync }>(
+      '/admin/kb/' + encodeURIComponent(docKey), { method: 'DELETE' }),
+
+  adminKbSync: () => call<KbSync>('/admin/kb/sync', { method: 'POST' }),
 
   /**
    * 后台：运营统计。

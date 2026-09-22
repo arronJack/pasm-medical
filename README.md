@@ -133,7 +133,7 @@ python -m pasm_medical.domain            # 领域模型（隔离规则 / 去标�
 python -m pasm_medical.safety            # 护栏（红线）
 python -m pasm_medical.mcp.server --selftest   # MCP sidecar，24 项
 python tools/e2e_medical_service.py      # 真起 HTTP 服务，17 项
-python tools/e2e_stack.py                # 三端联调，34 项（需先 mvn package）
+python tools/e2e_stack.py                # 三端联调，39 项（需先 mvn package）
 python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被抓到
 python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约 + 真跑 --check
 ```
@@ -151,11 +151,12 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 | **Spring Boot 业务层** | ✅ **编译 + 启动 + 三端联调通过**（JDK 18 / Maven 3.8.6）；登录鉴权（默认关闭演示账号）/ 薄转发 / 认知客户端；**JPA 持久化**（患者 / 就诊 / 审计 / 对接设置）+ 管理接口 `/api/admin/*`、`/api/patient/*` |
 | **授权与越权防护** | ✅ 后台限 `ROLE_STAFF`（患者令牌 403）；就诊详情做**归属校验**（挡 IDOR）；对接设置**服务端白名单校验** |
 | **审计与统计** | ✅ 审计 append-only，**读 + 写双向事件且每条都带操作者**；患者问题原文随 `input_snapshot` 落库并可在后台查看；统计口径明确（口径定义随接口返回，避免"看着合理的假数字"），口径与埋点都有"改回旧实现即转红"的断言盯着 |
-| 三端联调 | ✅ `tools/e2e_stack.py` **34 项全过**（含 7 项越权/非法输入反例；**6 项判据已做反向验证**：3 个安全判据 + 3 个统计口径/审计埋点） |
+| **资料库（回答依据）** | ✅ 后台可**新增 / 编辑 / 上下架 / 删除**；业务库是权威、认知侧只放"当前生效资料"的检索副本（全量同步）；**下架的资料不再作为任何回答的依据**。带依据问答走医疗侧的**相关性闸门**（命中词必须落在标题或标签上），没依据就拒答 —— 闸门与资料库都有正反断言盯着 |
+| 三端联调 | ✅ `tools/e2e_stack.py` **39 项全过**（含 7 项越权/非法输入反例；**8 项判据已做反向验证**：3 个安全判据 + 3 个统计口径/审计埋点 + 2 个资料库链路） |
 | 影像归档 | 未开始（P5，**只做归档与转交，不做分析**） |
 | 中医知识库 | 未开始（见 `docs/PLAN.md` §6） |
 
-**已验证的规模**：模块自检 **88 项** + MCP selftest **24 项** + 端到端 **17 项** + 反例对照 **5 项** + 三端联调 **34 项**（全部通过）。
+**已验证的规模**：模块自检 **88 项** + MCP selftest **24 项** + 端到端 **17 项** + 反例对照 **5 项** + 三端联调 **39 项**（全部通过）。
 
 > **启动、部署、配置、排障**见 [`docs/GUIDE.md`](docs/GUIDE.md)；
 > **功能说明**（每个功能在做什么、边界在哪）也在同一份文档里。

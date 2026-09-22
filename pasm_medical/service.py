@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from . import safety
 from . import lab
@@ -36,6 +36,60 @@ except Exception:                       # pragma: no cover
     relevance = None                    # type: ignore
 
 __all__ = ["MedicalService", "build_service"]
+
+#: 机构资料库条目在知识库里的 source 前缀。写进 source 是为了能**只清自己写的**条目，
+#: 不碰知识库自学习沉淀的 QA（那些是运行时自动攒的，清掉等于删学习成果）。
+DOC_SOURCE = "pasm-medical"
+
+#: 清理资料条目需要的插件内部字段（见 _purge_medical_docs 的说明）。
+_PURGE_ATTRS = ("_entries", "_save", "_lock", "_index_dirty")
+
+
+def _doc_key_of(entry: Dict[str, Any]) -> str:
+    """从知识库条目里取回业务库的资料 key；不是本项目写入的返回空串。
+
+    ★ 注意 recall 的返回值会把来源**再装饰一层**（``knowledge_base:<原始 source>``，
+    见插件的 recall 实现），所以必须先剥外层 —— 少了这一步，所有资料都会被
+    自己的前缀判断过滤掉，表现为"资料明明同步进去了，问它却一直拒答"。
+    这正是 2026-09-22 第一次跑通时踩到的：断言红了才发现**过滤条件把全部资料滤没了**。
+    """
+    src = str(entry.get("source") or "")
+    if src.startswith("knowledge_base:"):
+        src = src.split(":", 1)[1]
+    return src.split(":", 1)[1].strip() if src.startswith(DOC_SOURCE + ":") else ""
+
+
+def _purge_medical_docs(kb: Any) -> int:
+    """清掉本项目写入的资料条目，返回清除条数；**不支持时返回 -1**。
+
+    ⚠️ 这里读了 knowledge_base 插件的内部状态（`_entries` / `_save` / `_lock` / `_index_dirty`），
+    因为该插件只提供 ``ingest``（追加），**没有 remove / update**；而"资料下架后还能被检索到"
+    在医疗场景是事故 —— 不能靠"再追加一版"绕过，否则旧版本永远是依据。
+
+    三重保护，别把它们删掉：
+      ① 缺任一私有字段就返回 **-1**，调用方据此回报 ``purgeSupported=false``
+         —— **不静默当成清理成功**（那正是这个项目吃过亏的那类假象）；
+      ② 只删 ``kind=doc`` 且 source 前缀匹配的条目，不碰自学习沉淀的 QA；
+      ③ 清理失败也**不影响正确性**：``recall_docs`` 还会拿业务库的生效集合再过滤一次。
+
+    正解是给框架加一个公开的 ``remove_source()``（已记为待办，见 docs/GUIDE.md §8）。
+    """
+    if not all(hasattr(kb, a) for a in _PURGE_ATTRS):
+        return -1
+    try:
+        with kb._lock:
+            before = len(kb._entries)
+            kb._entries = [e for e in kb._entries
+                           if not (isinstance(e, dict)
+                                   and e.get("kind") == "doc"
+                                   and str(e.get("source") or "").startswith(DOC_SOURCE + ":"))]
+            removed = before - len(kb._entries)
+            if removed:
+                kb._save()
+                kb._index_dirty = True
+        return removed
+    except Exception:                       # pragma: no cover
+        return -1
 
 
 class MedicalService:
@@ -144,7 +198,8 @@ class MedicalService:
         return caps.recall(self._agent(patient_ref), query=query, k=k)
 
     def ask(self, patient_ref: str, question: str,
-            k: int = 5, *, use_gate: bool = True) -> Dict[str, Any]:
+            k: int = 5, *, use_gate: bool = True,
+            doc_keys: Optional[Set[str]] = None) -> Dict[str, Any]:
         """带护栏的问答。
 
         ★ 行为：**先检索，再过相关性闸门，再判断有无依据**。
@@ -167,8 +222,13 @@ class MedicalService:
         注意本方法**不生成自然语言结论** —— 那是 Spring Boot 侧接大模型之后的事。
         这里只负责把"能不能答、凭哪几条答"判定清楚。
         """
+        # ★ 两路召回：**患者私有记忆**（按患者分片）+ **机构资料库**（全院共享）。
+        #   以前只召回记忆 —— 于是"资料库"对问答毫无影响，那它就只是个摆设。
+        #   两路的来源必须标出来（sources[].kind）：医生要能分清"这条是患者档案里的"
+        #   还是"这条是机构指南里的"，两者的可信度与责任不同。
         got = self.recall(patient_ref, question, k=k)
-        raw = got.get("hits") or []
+        raw = list(got.get("hits") or []) + self.recall_docs(
+            question, k=k, active_keys=doc_keys)
         if use_gate and relevance is None:
             # ★ 装了闸门却用不了 → **宁可拒答也不放行**。
             #   这里与"校验类逻辑无法判定就放行"的规则不同：那条规则防的是**误拦正确内容**；
@@ -186,6 +246,9 @@ class MedicalService:
         sources = [{"title": h.get("title", ""), "brief": h.get("brief", ""),
                     "tags": list(h.get("tags", [])),
                     "salience": h.get("salience", 1),
+                    # memory=患者档案/记忆；doc=机构资料库。医生需要知道依据来自哪一侧
+                    "kind": h.get("kind", "memory"),
+                    **({"docKey": h["docKey"]} if h.get("docKey") else {}),
                     **({"score": h["score"]} if "score" in h else {})}
                    for h in keep]
         guarded = safety.guard_answer("", sources, min_sources=1)
@@ -203,6 +266,99 @@ class MedicalService:
         """
         got = self.recall(patient_ref, "就诊 主诉 判断 处置", k=k)
         return [h for h in (got.get("hits") or []) if "就诊" in (h.get("title") or "")]
+
+    # ---------------------------------------------------------- 资料库（机构级，**不按患者分片**）
+
+    def _kb(self) -> Any:
+        """取框架的知识库插件。取不到返回 None（调用方好判断，别抛）。"""
+        pm = getattr(self.app, "plugins", None)
+        return pm.get("knowledge_base") if pm is not None else None
+
+    def replace_docs(self, docs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """**全量替换**机构资料库（业务库是权威，认知侧只是检索副本）。
+
+        为什么是全量替换，而不是逐条增删改：
+        权威数据在业务库（Spring Boot 的 `knowledge_docs` 表），带状态 / 版本 / 复核人；
+        认知侧只需要一份"当前生效资料的检索副本"。逐条改删要在两侧同步 id 与版本，
+        多一处不一致就多一处"下架了却还能被引用"。
+
+        ★ 业务层每次变更后推**当前生效的全集**，这里先清掉上一批再重灌。
+        """
+        kb = self._kb()
+        if kb is None:
+            return {"ok": False, "error": "knowledge_base 插件未启用，资料库无法落库"}
+        purged = _purge_medical_docs(kb)
+        items: List[Dict[str, Any]] = []
+        for d in docs or []:
+            key = str(d.get("key") or "").strip()
+            title = str(d.get("title") or "").strip()
+            if not key or not title:
+                continue
+            content = str(d.get("content") or "").strip() or title
+            items.append({
+                "title": title,
+                "content": content,
+                "tags": [str(t) for t in (d.get("tags") or [])],
+                # source 同时承担两个作用：① 标明"这条是本项目写入的"（供清理）；
+                # ② 承载业务库的 key（供 ask 用生效集合过滤）。别挪进 tags —— tags 是
+                # 相关性闸门的命中面，塞 key 进去会让闸门多出噪声命中。
+                "source": "%s:%s" % (DOC_SOURCE, key),
+            })
+        added = int(kb.ingest(items)) if items else 0
+        return {"ok": True, "purged": purged, "purgeSupported": purged >= 0,
+                "added": added, "expected": len(items)}
+
+    def recall_docs(self, query: str, k: int = 5,
+                    active_keys: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
+        """检索机构资料（**共享**，与患者无关）。
+
+        `active_keys` 是业务库里"当前生效"的资料 key 集合。传了就只返回生效资料 ——
+        这是**正确性的第二道保险**：即使认知侧的清理失败（历史版本还留在库里），
+        已下架的资料也不会被当作依据引用。
+        """
+        kb = self._kb()
+        if kb is None or not query:
+            return []
+        try:
+            hits = kb.recall(query, k=max(k * 3, 12))
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for h in hits or []:
+            if not isinstance(h, dict) or h.get("kind") != "doc":
+                continue                      # 自学习沉淀的 QA 不算"机构资料"
+            key = _doc_key_of(h)
+            if not key:
+                continue                      # 非本项目写入的资料，不掺进医疗依据
+            if active_keys is not None and key not in active_keys:
+                continue
+            out.append({
+                "title": h.get("title") or "",
+                "brief": str(h.get("content") or "")[:200],
+                "tags": list(h.get("tags") or []),
+                "salience": 3,                # 机构资料比患者记忆更该被优先引用
+                "kind": "doc",
+                "docKey": key,
+                "score": h.get("score"),
+            })
+            if len(out) >= k:
+                break
+        return out
+
+    def doc_stats(self) -> Dict[str, Any]:
+        """资料库现状（给运维/验证用）：总条数 / 资料条数 / 自学习 QA 条数。"""
+        kb = self._kb()
+        if kb is None:
+            return {"ok": False, "error": "knowledge_base 插件未启用"}
+        s: Dict[str, Any] = {}
+        if hasattr(kb, "stats"):
+            try:
+                s.update(dict(kb.stats()))
+            except Exception:
+                pass
+        s["ok"] = True
+        s["purgeSupported"] = all(hasattr(kb, a) for a in _PURGE_ATTRS)
+        return s
 
     # ---------------------------------------------------------- 检验单（OCR → 确认 → 入记忆）
 
@@ -470,6 +626,29 @@ def register_medical_routes(svc: "MedicalService") -> int:
         """只读：本进程**实际生效**的 LLM 配置。业务层用它跟"机构期望值"对账。"""
         return 200, svc.llm_status()
 
+    # ★ 资料库用 /api/library/* 而不是 /api/kb/*：后者是框架自带的资料库前缀
+    #   （`/api/kb/stats` 就在 `_RESERVED_PATHS` 里），混在一起会让"这条路由归谁管"
+    #   变得说不清 —— 而且真撞上时 register_route 会直接抛错（这次就被它挡了一次）。
+    def _kb_sync(q, b):
+        """全量替换机构资料库（业务库是权威，这里是检索副本）。"""
+        return 200, svc.replace_docs(b.get("docs") or [])
+
+    def _kb_stats(q, b):
+        return 200, svc.doc_stats()
+
+    def _ask(q, b):
+        """**带闸门**的问答：患者记忆 + 机构资料两路召回，没依据就拒答。
+
+        ★ 为什么不直接让业务层调框架的 ``/api/cog/recall``：那条路只召回患者记忆，
+        既不含机构资料、也不经过相关性闸门 —— 于是"资料库"对问答毫无影响，
+        "无依据必须拒答"在界面上也形同虚设。判据归医疗侧，业务层只做转发。
+        """
+        keys = b.get("docKeys")
+        return 200, svc.ask(
+            str(b.get("patientRef") or ""), str(b.get("question") or ""),
+            k=int(b.get("k") or 5),
+            doc_keys={str(x) for x in keys} if isinstance(keys, list) else None)
+
     routes = [
         ("POST", "/api/consult/start", _start),
         ("POST", "/api/consult/answer", _answer),
@@ -480,6 +659,9 @@ def register_medical_routes(svc: "MedicalService") -> int:
         ("GET", "/api/encounters", _encounters),
         ("POST", "/api/critical-fact", _critical),
         ("GET", "/api/config", _config),
+        ("POST", "/api/library/sync", _kb_sync),
+        ("GET", "/api/library/stats", _kb_stats),
+        ("POST", "/api/answer", _ask),
     ]
     for method, path, fn in routes:
         gw.register_route(method, path, fn)

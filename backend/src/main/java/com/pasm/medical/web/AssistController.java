@@ -4,10 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.pasm.medical.cognition.PasmCognitionClient;
 import com.pasm.medical.domain.AiAudit;
 import com.pasm.medical.service.AuditService;
+import com.pasm.medical.service.KnowledgeDocService;
 import com.pasm.medical.service.PatientService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -33,12 +36,14 @@ public class AssistController {
     private final PasmCognitionClient cognition;
     private final AuditService audit;
     private final PatientService patients;
+    private final KnowledgeDocService kb;
 
     public AssistController(PasmCognitionClient cognition, AuditService audit,
-                           PatientService patients) {
+                           PatientService patients, KnowledgeDocService kb) {
         this.cognition = cognition;
         this.audit = audit;
         this.patients = patients;
+        this.kb = kb;
     }
 
     /**
@@ -57,17 +62,45 @@ public class AssistController {
             return ResponseEntity.badRequest().body(Map.of("error", "question 不能为空"));
         }
         patients.ensureExists(req.patientRef());
-        JsonNode hits = cognition.recall(req.patientRef(), req.question(),
-                req.k() <= 0 ? 5 : req.k());
-        int ev = hits.path("hits").size();
-        auditAsk(req.patientRef(), req.question(), ev);
-        return ResponseEntity.ok(Map.of(
+        int k = req.k() <= 0 ? 5 : req.k();
+        // ★ 走医疗侧的「带闸门问答」(/api/answer)，而不是框架的 /api/cog/recall：
+        //   ① 那条路只召回**患者记忆**、不含机构资料库 → 资料库对问答毫无影响（摆设）；
+        //   ② 它**不经过相关性闸门** → "无依据必须拒答"在界面上形同虚设。
+        //   docKeys 传业务库里"当前生效"的资料键：即使认知侧清理失败，
+        //   已下架的资料也不会被当成依据（第二道保险）。
+        JsonNode r = cognition.post("/api/answer", Map.of(
                 "patientRef", req.patientRef(),
                 "question", req.question(),
-                "evidence", hits,
-                // 恒为 true —— 不要因为"看起来没风险"就放开
-                "requiresPhysicianConfirmation", true,
-                "disclaimer", "本结果由辅助系统基于既有资料生成，仅供医师参考，不构成诊断意见。"));
+                "k", k,
+                "docKeys", kb.activeKeys()));
+        List<Map<String, Object>> sources = new ArrayList<>();
+        JsonNode arr = r.path("sources");
+        if (arr.isArray()) {
+            for (JsonNode n : arr) {
+                Object plain = cognition.toPlain(n);
+                if (plain instanceof Map<?, ?> mm) {
+                    Map<String, Object> c = new LinkedHashMap<>();
+                    mm.forEach((key, v) -> c.put(String.valueOf(key), v));
+                    sources.add(c);
+                }
+            }
+        }
+        boolean refused = r.path("refused").asBoolean(false);
+        auditAsk(req.patientRef(), req.question(), sources.size(), refused);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("patientRef", req.patientRef());
+        out.put("question", req.question());
+        // 保持 evidence.hits 的形状（既有前端契约），另外单独给出 sources / refused
+        out.put("evidence", Map.of("hits", sources));
+        out.put("sources", sources);
+        out.put("count", sources.size());
+        out.put("refused", refused);
+        out.put("refusalReason", r.path("refusal_reason").asText(""));
+        out.put("message", r.path("text").asText(""));
+        // 恒为 true —— 不要因为"看起来没风险"就放开
+        out.put("requiresPhysicianConfirmation", true);
+        out.put("disclaimer", "本结果由辅助系统基于既有资料生成，仅供医师参考，不构成诊断意见。");
+        return ResponseEntity.ok(out);
     }
 
     /** 认知上下文（只读）：前端把 recalled 渲染成"系统记得的事"，供医生核对与纠错。 */
@@ -115,14 +148,18 @@ public class AssistController {
 
     // ------------------------------------------------------------ 审计埋点
 
-    private void auditAsk(String patientRef, String question, int evidenceCount) {
+    private void auditAsk(String patientRef, String question, int evidenceCount, boolean refused) {
         AiAudit a = new AiAudit();
         a.setPatientRef(patientRef);
         a.setActor(AuditService.currentActor(null));
         a.setAction("ask");
         a.setEvidenceCount(evidenceCount);
-        a.setModelVersion("cognition-recall");
+        a.setModelVersion("cognition-gated-ask");
         a.setInputSnapshot("question=" + question);
+        // ★ 必须记下"这次拒答了没有"：统计里的**拒答率**就是数这个字段
+        //   （`countByActionAndRefusedTrue("ask")`）。以前从不设置它 → 分子恒为 0 →
+        //   拒答率永远显示 0.0，一个"看着合理"的假数字。
+        a.setRefused(refused);
         try { audit.record(a); } catch (Exception ignored) { }
     }
 

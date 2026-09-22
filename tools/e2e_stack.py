@@ -305,6 +305,46 @@ def main() -> int:                                # noqa: C901
               bool(asks) and asks[0].get("actor") == "staff",
               "命中 %d 条 %s" % (len(asks), str(asks[:1])[:200]))
 
+        # ---------- 7.5) 资料库：真的可增删，而且真的会影响问答 ----------
+        #   ★ 判据必须落在"资料进了回答依据"（sources 里有 kind=doc 的条目），
+        #     只断言接口 200 或"没报错"证明不了资料库不是摆设。
+        st, d = req("POST", base + "/api/admin/kb",
+                    {"title": "冒烟测试资料条目", "tags": "冒烟测试探针,冒烟测试",
+                     "content": "e2e 写入的资料条目，用于验证资料库可增删且能被问答引用。",
+                     "version": "e2e", "reviewer": "e2e"}, token=token)
+        kb_key = str((d.get("doc") or {}).get("docKey") or "")
+        kb_synced = (d.get("sync") or {}).get("synced")
+        check("★ 新增资料：落业务库 + 同步到认知侧检索副本",
+              st == 200 and bool(kb_key) and kb_synced is True,
+              "key=%s synced=%s %s" % (kb_key, kb_synced, str(d)[:150]))
+
+        kb_q = "冒烟测试探针是什么"
+        st, d = req("POST", base + "/api/assist/ask",
+                    {"patientRef": "kb-probe", "question": kb_q, "k": 5}, token=token)
+        doc_src = [s for s in (d.get("sources") or []) if s.get("kind") == "doc"]
+        check("★ 资料库真的进问答：提问命中新增资料 → 不拒答且来源标为 doc"
+              "（旧实现走 /api/cog/recall，只召回患者记忆、不含资料库、也不过闸门）",
+              st == 200 and d.get("refused") is False and bool(doc_src),
+              "refused=%s docSources=%s" % (d.get("refused"), str(doc_src)[:180]))
+
+        st, d = req("POST", base + "/api/admin/kb/%s/status" % kb_key,
+                    {"active": False}, token=token)
+        check("★ 下架资料：状态变更 + 重新同步检索副本",
+              st == 200 and (d.get("doc") or {}).get("status") == "inactive", str(d)[:150])
+
+        st, d = req("POST", base + "/api/assist/ask",
+                    {"patientRef": "kb-probe", "question": kb_q, "k": 5}, token=token)
+        check("★ 反例：资料下架后同一提问必须**回到拒答**（下架的资料不能继续当依据）",
+              st == 200 and d.get("refused") is True and not (d.get("sources") or []),
+              "refused=%s sources=%s" % (d.get("refused"), str(d.get("sources"))[:150]))
+
+        # ★ 拒答率不再恒为 0：上面那次拒答要能在统计里看见
+        #   （旧实现 ask 审计从不设置 refused → countByActionAndRefusedTrue("ask") 恒为 0）
+        st, s = req("GET", base + "/api/admin/stats", token=token)
+        check("★ 拒答被记入审计并可用于统计（以前分子恒为 0 → 拒答率永远显示 0.0）",
+              st == 200 and int(s.get("refusalsToday") or 0) >= 1,
+              "refusalsToday=%s questionsToday=%s" % (s.get("refusalsToday"), s.get("questionsToday")))
+
         # ---------- 8) 就诊结构化详情（+ 归属校验反例）
         st, encs = req("GET", base + "/api/patient/encounters?ref=demo-patient-001", token=token)
         first_id = str(encs[0].get("id")) if isinstance(encs, list) and encs else ""
