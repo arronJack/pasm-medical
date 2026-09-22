@@ -271,7 +271,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY pasm_medical ./pasm_medical
-RUN pip install --no-cache-dir "pasm-skills>=0.6.2" "pasm-framework>=0.5.2" -e .
+RUN pip install --no-cache-dir "pasm-skills>=0.6.2" "pasm-framework>=0.5.3" -e .
 ENV PASM_MEDICAL_LLM=null
 EXPOSE 8090
 CMD ["python", "-m", "pasm_medical.service", "--host", "0.0.0.0", "--port", "8090"]
