@@ -2,6 +2,9 @@ package com.pasm.medical.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.pasm.medical.cognition.PasmCognitionClient;
+import com.pasm.medical.domain.AiAudit;
+import com.pasm.medical.service.AuditService;
+import com.pasm.medical.service.PatientService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -28,9 +31,14 @@ import java.util.Map;
 public class AssistController {
 
     private final PasmCognitionClient cognition;
+    private final AuditService audit;
+    private final PatientService patients;
 
-    public AssistController(PasmCognitionClient cognition) {
+    public AssistController(PasmCognitionClient cognition, AuditService audit,
+                           PatientService patients) {
         this.cognition = cognition;
+        this.audit = audit;
+        this.patients = patients;
     }
 
     /**
@@ -48,8 +56,11 @@ public class AssistController {
         if (req.question() == null || req.question().isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "question 不能为空"));
         }
+        patients.ensureExists(req.patientRef());
         JsonNode hits = cognition.recall(req.patientRef(), req.question(),
                 req.k() <= 0 ? 5 : req.k());
+        int ev = hits.path("hits").size();
+        auditAsk(req.patientRef(), req.question(), ev);
         return ResponseEntity.ok(Map.of(
                 "patientRef", req.patientRef(),
                 "question", req.question(),
@@ -75,6 +86,9 @@ public class AssistController {
         // salience=5：关键事实绝不能被后续闲聊挤出上下文（再次处方时可能致命）
         JsonNode r = cognition.observe(req.patientRef(), req.title(), req.detail(),
                 req.tags() == null ? List.of() : req.tags(), 5);
+        patients.recordFacts(req.patientRef(), req.title(), null);
+        auditAct(req.patientRef(), "critical-fact", 1, "cognition-observe",
+                "title=" + req.title());
         return ResponseEntity.ok(Map.of("result", r, "salience", 5));
     }
 
@@ -87,6 +101,9 @@ public class AssistController {
     @PostMapping("/feedback")
     public ResponseEntity<Map<String, Object>> feedback(@RequestBody FeedbackRequest req) {
         JsonNode r = cognition.feedback(req.patientRef(), req.kind(), req.action());
+        String action = "feedback-" + (req.action() == null ? "other" : req.action());
+        auditAct(req.patientRef(), action, null, "cognition-feedback",
+                "kind=" + req.kind() + ";action=" + req.action());
         return ResponseEntity.ok(Map.of("result", r));
     }
 
@@ -94,6 +111,29 @@ public class AssistController {
     @GetMapping("/cognition-health")
     public ResponseEntity<Map<String, Object>> cognitionHealth() {
         return ResponseEntity.ok(Map.of("available", cognition.isAvailable()));
+    }
+
+    // ------------------------------------------------------------ 审计埋点
+
+    private void auditAsk(String patientRef, String question, int evidenceCount) {
+        AiAudit a = new AiAudit();
+        a.setPatientRef(patientRef);
+        a.setAction("ask");
+        a.setEvidenceCount(evidenceCount);
+        a.setModelVersion("cognition-recall");
+        a.setInputSnapshot("question=" + question);
+        try { audit.record(a); } catch (Exception ignored) { }
+    }
+
+    private void auditAct(String patientRef, String action, Integer evidenceCount,
+                          String model, String snapshot) {
+        AiAudit a = new AiAudit();
+        a.setPatientRef(patientRef);
+        a.setAction(action);
+        a.setEvidenceCount(evidenceCount);
+        a.setModelVersion(model);
+        a.setInputSnapshot(snapshot);
+        try { audit.record(a); } catch (Exception ignored) { }
     }
 
     // ------------------------------------------------------------ 请求体

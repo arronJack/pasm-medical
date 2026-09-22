@@ -1,6 +1,8 @@
 package com.pasm.medical.web;
 
 import com.pasm.medical.config.TokenService;
+import com.pasm.medical.domain.AiAudit;
+import com.pasm.medical.service.AuditService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -11,9 +13,11 @@ import java.util.Map;
 public class AuthController {
 
     private final TokenService tokens;
+    private final AuditService audit;
 
-    public AuthController(TokenService tokens) {
+    public AuthController(TokenService tokens, AuditService audit) {
         this.tokens = tokens;
+        this.audit = audit;
     }
 
     @PostMapping("/login")
@@ -26,6 +30,13 @@ public class AuthController {
             // 不区分"账号不存在"与"密码错" —— 避免被用来枚举账号
             return ResponseEntity.status(401).body(Map.of("error", "账号或密码不正确"));
         }
+        // 登录留痕：谁、何时登入。审计库只增不改，是合规红线的落地。
+        AiAudit a = new AiAudit();
+        a.setActor(r[0]);
+        a.setAction("login");
+        a.setModelVersion("auth");
+        a.setInputSnapshot("username=" + r[0] + ";role=" + r[1]);
+        try { audit.record(a); } catch (Exception ignored) { }
         return ResponseEntity.ok(Map.of("token", r[0], "role", r[1], "displayName", r[2]));
     }
 

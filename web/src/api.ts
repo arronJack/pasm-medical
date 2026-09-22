@@ -74,6 +74,31 @@ export const api = {
   feedback: (patientRef: string, kind: string, action: string) =>
     call<{ ok: boolean }>('/assist/feedback', {
       method: 'POST', body: JSON.stringify({ patientRef, kind, action }) }),
+
+  /** 患者档案（业务层视图）：过敏史 / 慢病来自结构化字段。 */
+  patient: (ref: string) =>
+    call<{ ref: string; name: string | null; sex: string | null; age: number | null; allergy: string | null; chronic: string | null }>(
+      '/patient?ref=' + encodeURIComponent(ref)),
+
+  /** 该患者历史就诊（业务库真实数据源，非前端硬编码）。 */
+  patientEncounters: (ref: string) =>
+    call<{ id: string; time: string; title: string; summary: string; urgency: string }[]>(
+      '/patient/encounters?ref=' + encodeURIComponent(ref)),
+
+  /** 后台：真实患者列表（含最新就诊 / 分诊 / 次数）。 */
+  adminPatients: () =>
+    call<{ ref: string; name: string; allergy: string; chronic: string; encounterCount: number; last: string; dept: string; urgency: string }[]>(
+      '/admin/patients'),
+
+  /** 后台：审计（append-only，最近 200 条）。 */
+  adminAudit: () =>
+    call<{ time: string; ref: string; actor: string; action: string; evidenceCount: number; modelVersion: string; refused: boolean }[]>(
+      '/admin/audit'),
+
+  /** 后台：运营统计（今日问诊量 / 红旗命中 / 拒答率 / 采纳率）。 */
+  adminStats: () =>
+    call<{ consultToday: number; redFlags: number; refusalRate: number; adoptionRate: number; askTotal: number; feedbackTotal: number }>(
+      '/admin/stats'),
 }
 
 export interface ConsultQuestion { key: string; text: string; why: string; from_tree: string }

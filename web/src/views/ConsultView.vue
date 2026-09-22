@@ -149,7 +149,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { api, type ConsultState, type Evidence, type LabItem, type Triage } from '../api'
 
 interface Msg {
@@ -160,11 +160,11 @@ interface Msg {
   resolved?: string
 }
 
-const patient = ref({
-  ref: 'demo-patient-001', name: '示例患者', sex: '女', age: 46,
-  allergy: '青霉素', chronic: '高血压 3 级',
+interface PatientProfile { ref: string; name: string | null; sex: string | null; age: number | null; allergy: string | null; chronic: string | null }
+const patient = ref<PatientProfile>({
+  ref: 'demo-patient-001', name: null, sex: null, age: null, allergy: null, chronic: null,
 })
-const initial = computed(() => patient.value.name.slice(0, 1))
+const initial = computed(() => (patient.value.name || patient.value.ref).slice(0, 1))
 
 const messages = ref<Msg[]>([
   { role: 'assistant', text: '你好，我是预问诊助手。请先告诉我这次主要哪里不舒服？' },
@@ -197,10 +197,24 @@ const urgencyText = computed(() => {
   return u === 'emergency' ? '紧急' : u === 'urgent' ? '尽快' : '常规'
 })
 
-const history = ref([
-  { id: 'h1', time: '2026-09-21 10:30', title: '胸痛 2 小时', summary: '已转诊心内科' },
-  { id: 'h2', time: '2026-08-12 15:02', title: '发热 3 天', summary: '上呼吸道感染' },
-])
+const history = ref<{ id: string; time: string; title: string; summary: string }[]>([])
+
+/** 左栏患者档案 + 历史就诊：全部来自业务层真实接口（dev 档由 DemoDataSeeder 灌演示数据）。 */
+async function loadPatient() {
+  try {
+    const p = await api.patient(patient.value.ref)
+    if (p) patient.value = { ...patient.value, ...p }
+  } catch {
+    /* 接口不可用时保留左侧默认骨架，不阻断主流程 */
+  }
+  try {
+    history.value = await api.patientEncounters(patient.value.ref)
+  } catch {
+    history.value = []
+  }
+}
+
+onMounted(loadPatient)
 
 async function scrollDown() {
   await nextTick()

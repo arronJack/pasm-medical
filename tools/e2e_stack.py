@@ -37,7 +37,11 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 BACKEND = REPO / "backend"
 
-JAVA = os.environ.get("JAVA_HOME", r"C:\Program Files\Java\jdk-18.0.1.1")
+# ★ 必须用 JDK 17+ 跑这个 jar（Spring Boot 3 编译产物）。本机常有 JAVA_HOME 指向 JDK 8，
+# 若直接信它会导致 UnsupportedClassVersionError。所以优先用已知的 JDK 18，再回退到环境值。
+JAVA = r"C:\Program Files\Java\jdk-18.0.1.1"
+if not os.path.isdir(JAVA):
+    JAVA = os.environ.get("JAVA_HOME", JAVA)
 JAVA_BIN = os.path.join(JAVA, "bin", "java.exe") if os.path.isdir(JAVA) else "java"
 API_TOKEN = "stack-token-please-change"
 
@@ -206,6 +210,28 @@ def main() -> int:                                # noqa: C901
         # ---------- 6) 时间轴
         st, d = req("GET", base + "/api/encounters?patientRef=p1", token=token)
         check("/api/encounters 可达且返回列表", st == 200 and "encounters" in d, str(d)[:120])
+
+        # ---------- 7) 业务层持久化（dev 档 DemoDataSeeder 灌入的演示数据）
+        st, d = req("GET", base + "/api/patient?ref=demo-patient-001", token=token)
+        check("★ /api/patient 返回真实患者档案（含过敏史）",
+              st == 200 and d.get("allergy") == "青霉素" and d.get("name") == "示例患者",
+              str(d)[:160])
+
+        st, d = req("GET", base + "/api/patient/encounters?ref=demo-patient-001", token=token)
+        check("★ /api/patient/encounters 返回真实历史就诊",
+              st == 200 and isinstance(d, list) and len(d) >= 1, str(d)[:160])
+
+        st, d = req("GET", base + "/api/admin/patients", token=token)
+        check("★ 后台 /api/admin/patients 返回真实患者列表",
+              st == 200 and isinstance(d, list) and len(d) >= 1, str(d)[:160])
+
+        st, d = req("GET", base + "/api/admin/stats", token=token)
+        check("★ 后台 /api/admin/stats 返回统计（拒答率/采纳率）",
+              st == 200 and "refusalRate" in d and "adoptionRate" in d, str(d)[:160])
+
+        st, d = req("GET", base + "/api/admin/audit", token=token)
+        check("★ 后台 /api/admin/audit 返回审计（append-only）",
+              st == 200 and isinstance(d, list), str(d)[:160])
     finally:
         for name, p in procs:
             try:

@@ -7,6 +7,9 @@
     </aside>
 
     <section class="panel">
+      <p v-if="loading" class="hint">正在从业务层拉取真实数据…</p>
+      <p v-if="err" class="hint warn">加载失败：{{ err }}</p>
+
       <!-- 患者情况 -->
       <template v-if="tab === 'patients'">
         <h2>患者情况</h2>
@@ -115,7 +118,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
+import { api } from '../api'
 
 const tabs = [
   { id: 'patients', name: '患者情况' },
@@ -126,11 +130,15 @@ const tabs = [
 ]
 const tab = ref('patients')
 
-const patients = [
-  { ref: 'demo-patient-001', name: '示例患者', last: '2026-09-21 10:30 胸痛', dept: '心内科 / 急诊内科', urgency: 'emergency' },
-  { ref: 'demo-patient-002', name: '示例患者二', last: '2026-09-20 09:12 发热', dept: '发热门诊', urgency: 'routine' },
-]
+// ★ 全部从业务层真实接口拉取（dev 档由 DemoDataSeeder 灌入演示数据）。
+interface PatientRow { ref: string; name: string; allergy: string; chronic: string; encounterCount: number; last: string; dept: string; urgency: string }
+const patients = ref<PatientRow[]>([])
+const stats = ref<{ label: string; value: string | number; note: string }[]>([])
+const audit = ref<{ time: string; ref: string; act: string; ev: number; model: string }[]>([])
+const loading = ref(false)
+const err = ref('')
 
+// 资料库：固定的"规则表复核"清单（上线前必须由临床药师逐条复核），非动态数据，保留为静态参考。
 const kb = [
   { name: '临床指南汇编', kind: '西医', ver: '2026.09', reviewer: '（待临床顾问）', ok: false },
   { name: '中药配伍禁忌表（十八反/十九畏）', kind: '中医·规则', ver: '2026.09-starter', reviewer: '', ok: false },
@@ -139,23 +147,40 @@ const kb = [
   { name: '红旗症状规则表', kind: '规则', ver: '2026.09-starter', reviewer: '', ok: false },
 ]
 
-const stats = [
-  { label: '今日问诊量', value: '—', note: '待业务层接通统计接口' },
-  { label: '红旗命中', value: '—', note: '安全指标，优先关注' },
-  { label: '拒答率', value: '—', note: '高说明资料库覆盖不足' },
-  { label: '建议采纳率', value: '—', note: '来自医生「采纳/否决」反馈' },
-]
-
-const audit = [
-  { time: '2026-09-21 10:31', ref: 'demo-patient-001', act: '预问诊红线中断', ev: 3, model: 'rule-engine' },
-  { time: '2026-09-21 10:32', ref: 'demo-patient-001', act: '检验单识别（待确认）', ev: 6, model: 'ocr-stub' },
-]
-
 const cfg = ref({ ocr: 'none', lis: 'off', llm: 'null', model: '' })
 
+function pct(v: number) { return Math.round((v || 0) * 100) + '%' }
 function urgencyText(u: string) {
   return u === 'emergency' ? '紧急' : u === 'urgent' ? '尽快' : '常规'
 }
+
+async function load() {
+  loading.value = true
+  err.value = ''
+  try {
+    const [ps, st, au] = await Promise.all([
+      api.adminPatients(), api.adminStats(), api.adminAudit(),
+    ])
+    patients.value = ps as PatientRow[]
+    const s = st as Record<string, number>
+    stats.value = [
+      { label: '今日问诊量', value: s.consultToday ?? 0, note: '含预问诊与问诊结束' },
+      { label: '红旗命中', value: s.redFlags ?? 0, note: '安全指标，优先关注' },
+      { label: '拒答率', value: pct(s.refusalRate), note: '高说明资料库覆盖不足' },
+      { label: '建议采纳率', value: pct(s.adoptionRate), note: '来自医生「采纳/否决」反馈' },
+    ]
+    audit.value = (au as Record<string, unknown>[]).map(a => ({
+      time: String(a.time), ref: String(a.ref), act: String(a.action),
+      ev: Number(a.evidenceCount ?? 0), model: String(a.modelVersion ?? ''),
+    }))
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(load)
 </script>
 
 <style scoped>

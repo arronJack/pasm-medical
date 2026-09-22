@@ -24,6 +24,7 @@ Repository = "https://github.com/arronJack/pasm-medical"
 
 [project.scripts]
 pasm-medical = "pasm_medical.service:main"
+pasm-medical-mcp = "pasm_medical.mcp.server:main"
 
 [tool.setuptools]
-packages = ["pasm_medical"]
+packages = ["pasm_medical", "pasm_medical.mcp"]
