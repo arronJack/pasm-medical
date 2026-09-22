@@ -166,7 +166,7 @@
 
 ```bash
 # 安装依赖（基座 + 应用框架）
-pip install "pasm-skills>=0.6.2" "pasm-framework>=0.5.2"
+pip install "pasm-skills>=0.6.2" "pasm-framework>=0.5.3"
 pip install -e .
 
 # 起服务（管理令牌务必设置，认知接口全靠它）
