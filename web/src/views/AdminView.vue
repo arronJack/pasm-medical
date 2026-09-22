@@ -67,11 +67,23 @@
       <template v-else-if="tab === 'audit'">
         <h2>审计（只增不改）</h2>
         <table>
-          <thead><tr><th>时间</th><th>患者</th><th>动作</th><th>依据条数</th><th>模型版本</th></tr></thead>
+          <thead>
+            <tr>
+              <th>时间</th><th>操作者</th><th>患者</th><th>动作</th><th>依据</th><th>内容 / 问题原文</th><th>模型版本</th>
+            </tr>
+          </thead>
           <tbody>
-            <tr v-for="a in audit" :key="a.time + a.act">
-              <td class="mono">{{ a.time }}</td><td class="mono">{{ a.ref }}</td>
-              <td>{{ a.act }}</td><td>{{ a.ev }}</td><td class="mono">{{ a.model }}</td>
+            <tr v-for="a in audit" :key="a.id">
+              <td class="mono">{{ a.time }}</td>
+              <td class="mono">{{ a.actor || '—' }}</td>
+              <td class="mono">{{ a.ref || '—' }}</td>
+              <td>
+                {{ a.act }}
+                <span v-if="a.refused" class="badge warn">拒答</span>
+              </td>
+              <td>{{ a.ev }}</td>
+              <td class="snap" :title="a.input">{{ a.input || '—' }}</td>
+              <td class="mono">{{ a.model }}</td>
             </tr>
           </tbody>
         </table>
@@ -178,7 +190,20 @@ const tab = ref('patients')
 interface PatientRow { ref: string; name: string; allergy: string; chronic: string; encounterCount: number; last: string; dept: string; urgency: string }
 const patients = ref<PatientRow[]>([])
 const stats = ref<{ label: string; value: string | number; note: string }[]>([])
-const audit = ref<{ time: string; ref: string; act: string; ev: number; model: string }[]>([])
+interface AuditRow {
+  id: number
+  time: string
+  actor: string
+  ref: string
+  act: string
+  ev: number
+  /** 输入快照：问答时就是患者问题的原文（超 300 字已截断）。 */
+  input: string
+  inputTruncated: boolean
+  refused: boolean
+  model: string
+}
+const audit = ref<AuditRow[]>([])
 const loading = ref(false)
 const err = ref('')
 
@@ -269,9 +294,19 @@ async function load() {
         note: `累计 采纳 /（采纳 + 否决），样本 ${n('feedbackTotal')} 次；用累计是因为单日反馈样本太小`,
       },
     ]
-    audit.value = (au as Record<string, unknown>[]).map(a => ({
-      time: String(a.time), ref: String(a.ref), act: String(a.action),
-      ev: Number(a.evidenceCount ?? 0), model: String(a.modelVersion ?? ''),
+    // 直接映射而不是 as Record<string, unknown>：adminAudit 的类型是精确的，
+    // 保留类型检查才能挡住"接口改了字段名、前端读 undefined"这类静默失效。
+    audit.value = au.map(a => ({
+      id: a.id,
+      time: a.time,
+      actor: a.actor,
+      ref: a.ref,
+      act: a.action,
+      ev: a.evidenceCount,
+      input: a.inputSnapshot,
+      inputTruncated: a.inputTruncated,
+      refused: a.refused,
+      model: a.modelVersion,
     }))
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e)
@@ -299,6 +334,11 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; font-weight: 400; color: var(--text-3); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
 td { padding: 8px; border-bottom: 1px solid var(--line); }
 .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--text-2); }
+/* 内容列：问题原文可能很长，限宽截断（完整值在 title 里，悬停可见） */
+.snap {
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-2); cursor: help;
+}
 .badge { font-size: 12px; padding: 2px 8px; border-radius: 5px; }
 .badge.emergency { background: var(--danger-bg); color: var(--danger-fg); }
 .badge.routine, .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }

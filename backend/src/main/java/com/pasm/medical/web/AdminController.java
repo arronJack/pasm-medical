@@ -59,6 +59,8 @@ public class AdminController {
     /** 患者情况：每位患者最新一次就诊 + 分诊 + 就诊次数。 */
     @GetMapping("/patients")
     public ResponseEntity<List<Map<String, Object>>> patients() {
+        // 读审计：这是**全院患者名单**，比看单个患者档案更敏感 —— 谁拉过这份名单必须留痕
+        audit.recordRead(AuditService.currentActor(null), "", "read-admin-patients", "scope=all");
         ZoneId z = ZoneId.systemDefault();
         var out = patients.findTop100ByOrderByCreatedAtDesc().stream().map(p -> {
             var last = encounters.findByPatientRefOrderByOccurredAtDesc(p.getRef())
@@ -83,12 +85,23 @@ public class AdminController {
         return ResponseEntity.ok(out);
     }
 
-    /** 审计（只增不改）：最近 200 条。 */
+    /**
+     * 审计（只增不改）：最近 200 条。
+     *
+     * <p>★ 必须把 {@code inputSnapshot} 也返回：问诊的问题原文就存在这里
+     * （{@code AssistController} 写的是 {@code question=…}）。以前接口不返回这个字段，
+     * 于是"后台看不到患者问了什么"—— 数据在库里躺着，界面却是空的。
+     *
+     * <p>快照可能是整段配置或整句提问，统一截到 {@value #SNAPSHOT_LIMIT} 字再下发，
+     * 避免一条记录把整个列表撑大；截断会加省略号，不假装是全文。
+     */
     @GetMapping("/audit")
     public ResponseEntity<List<Map<String, Object>>> audit() {
         ZoneId z = ZoneId.systemDefault();
         var out = audits.findTop200ByOrderByOccurredAtDesc().stream().map(a -> {
             Map<String, Object> m = new java.util.LinkedHashMap<>();
+            // id 给前端当列表 key —— 用「时间+动作」当 key 在同一分钟内必然撞车（读审计尤其频繁）
+            m.put("id", a.getId());
             m.put("time", a.getOccurredAt().atZone(z).toString().replace('T', ' ').substring(0, 16));
             m.put("ref", a.getPatientRef() == null ? "" : a.getPatientRef());
             m.put("actor", a.getActor() == null ? "" : a.getActor());
@@ -96,10 +109,17 @@ public class AdminController {
             m.put("evidenceCount", a.getEvidenceCount() == null ? 0 : a.getEvidenceCount());
             m.put("modelVersion", a.getModelVersion() == null ? "" : a.getModelVersion());
             m.put("refused", Boolean.TRUE.equals(a.getRefused()));
+            String snap = a.getInputSnapshot() == null ? "" : a.getInputSnapshot();
+            boolean cut = snap.length() > SNAPSHOT_LIMIT;
+            m.put("inputSnapshot", cut ? snap.substring(0, SNAPSHOT_LIMIT) + "…" : snap);
+            m.put("inputTruncated", cut);
             return m;
         }).toList();
         return ResponseEntity.ok(out);
     }
+
+    /** 审计快照下发时的截断长度。 */
+    private static final int SNAPSHOT_LIMIT = 300;
 
     /**
      * 运营统计。

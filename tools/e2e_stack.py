@@ -278,9 +278,32 @@ def main() -> int:                                # noqa: C901
         check("★ 反例：灌 250 条审计后，今日问诊量仍按 consult-start 精确 +1（旧实现会掉到 0）",
               counts_ok, "before=%s after=%s" % (before, after))
 
+        # ★★ 审计：读事件 + 操作者 + 问题原文
+        #   注意顺序：上面的统计断言灌了 250 条审计，会把更早的记录挤出"最近 200 条"
+        #   （/api/admin/audit 只返回 200 条），所以这里**现场**再读一次，
+        #   保证被测事件一定落在窗口内 —— 否则断言会随执行顺序时绿时红。
+        req("GET", base + "/api/patient?ref=demo-patient-001", token=token)
         st, d = req("GET", base + "/api/admin/audit", token=token)
         check("★ 后台 /api/admin/audit 返回审计（append-only）",
               st == 200 and isinstance(d, list), str(d)[:160])
+
+        reads = [a for a in d if a.get("action") == "read-patient"
+                 and a.get("ref") == "demo-patient-001"] if isinstance(d, list) else []
+        check("★ 读审计：查看患者档案必须留痕，且带正确操作者"
+              "（旧实现只有写事件、actor 还是空的 —— 出事查不出'谁看的'）",
+              bool(reads) and all(a.get("actor") == "staff" for a in reads),
+              "命中 %d 条 %s" % (len(reads), str(reads[:1])[:180]))
+
+        marker = "e2e-audit-probe-7f3a"
+        req("POST", base + "/api/assist/ask",
+            {"patientRef": "audit-probe", "question": marker, "k": 3}, token=token)
+        st, d2 = req("GET", base + "/api/admin/audit", token=token)
+        asks = [a for a in d2 if a.get("action") == "ask"
+                and marker in str(a.get("inputSnapshot") or "")] if isinstance(d2, list) else []
+        check("★ 审计带问题原文：ask 的 inputSnapshot 含提问内容并下发到后台"
+              "（旧接口不返回该字段 → 后台看不到患者问了什么）",
+              bool(asks) and asks[0].get("actor") == "staff",
+              "命中 %d 条 %s" % (len(asks), str(asks[:1])[:200]))
 
         # ---------- 8) 就诊结构化详情（+ 归属校验反例）
         st, encs = req("GET", base + "/api/patient/encounters?ref=demo-patient-001", token=token)

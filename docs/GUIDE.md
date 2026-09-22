@@ -93,7 +93,7 @@
 | 患者情况 | ✅ 列表：ref / 姓名 / 过敏 / 慢病 / 就诊次数 / 最近就诊的科室与分诊（真实接口） | 患者**详情下钻**（摘要全文、历次就诊）；患者档案的新增与编辑 |
 | 资料库 | ⚠️ **目前是前端硬编码的静态清单**（`web/src/views/AdminView.vue` 里 5 行"待复核"占位），不是库里的资料 | 资料的新增 / 编辑 / 上下架 + 与认知层知识库打通。**这条最急**：没有资料可命中，`/assist/ask` 过相关性闸门时只能一直拒答 |
 | 统计 | ✅ 已接真实数据，口径见下 | 分诊准确率（要"医生最终科室 vs 系统推荐"的对照数据，未开始） |
-| 审计 | ⚠️ 已记录 `login` / `ask` / `consult-*` / `feedback-*` / `config-update`；**问题原文已随 `input_snapshot` 落库，但接口没返回**；且只有"写"事件 | 面板展示问题原文；**读审计**（谁查看了哪个患者的病历）；登出与登录失败 |
+| 审计 | ✅ **写事件 + 读事件**，**每条都带操作者**；问题原文随 `input_snapshot` 落库并**已下发到面板**（超 300 字截断，`inputTruncated` 标明） | 登出与登录失败；审计查询本身留痕；防篡改（哈希链 / 只读库）与导出 |
 | 对接设置 | ✅ 真读写业务库，并与认知服务实际生效值对账（`drift`） | LIS / HIS / EMR 的真实适配层 |
 
 > 后台整体要求 **`ROLE_STAFF`**：它能读出全院患者的过敏史，还能改「大模型指向何处」
@@ -113,6 +113,25 @@
 > 有两个错：**审计超过 200 条就静默封顶**、**一次问诊被重复计数** —— 都不报错，只给出一个看着合理的假数字。
 > 现在 `tools/e2e_stack.py` 有专门的反例断言盯着：**先灌 250 条审计，再起一次问诊，要求计数精确 +1**
 > （把实现改回旧逻辑时该断言**精确转红**：`before=0 after=0`，其余 31 项保持绿）。
+
+**审计事件表**（`ai_audit`，append-only）：
+
+| 动作 | 写入方 | `input_snapshot` 里是什么 |
+|---|---|---|
+| `login` | 登录 | `username=…;role=…` |
+| `read-patient` / `read-encounters` / `read-encounter` / `read-timeline` | 查看患者档案 / 历史就诊 / 单次就诊详情 / 认知时间轴 | `ref=…`（就诊详情还带 `encounterId=…`） |
+| `read-admin-patients` | 后台拉**全院患者名单** | `scope=all` |
+| `ask` | 带依据问答 | **`question=…`（患者问题原文，⚠️ 含患者自述内容）** |
+| `consult-start` / `consult-answer` / `consult-finish` / `consult-redflag` | 预问诊链路 | `path=/api/consult/…` |
+| `lab-parse` / `lab-confirm` | 检验单识别 / 确认 | `path=/api/lab/…` |
+| `critical-fact` / `feedback-*` | 关键事实登记 / 医生对 AI 输出的处置 | `title=…` / `kind=…;action=…` |
+| `config-update` | 改对接设置 | `ocr=…;lis=…;llm=…;model=…;baseUrl=…` |
+
+> ★ **读事件也必须带操作者**：不带 actor 的读审计等于没记 —— 面板上"操作者"列永远是空的，
+> 出了泄露根本回答不了"是谁看的"。实现上由 `AuditService.currentActor()` 统一取
+> （优先用传入的认证对象，否则从 `SecurityContextHolder` 取），避免新增接口时漏传。
+> 读审计是**先记再看**：即使随后返回 404（ref 不存在 / 不属于该患者），这次"试图查看"也已留痕
+> —— IDOR 探测恰恰靠这个发现。
 
 ### 3.3 「无依据必须拒答」
 
@@ -363,9 +382,21 @@ python tools/e2e_stack.py
 **业务层持久化**（患者档案 / 历史就诊 / 后台患者列表 / 统计 / 审计）→
 **就诊结构化详情 + 归属校验** → **对接设置读写 / 对账 / 白名单校验** → **角色越权 403**。
 
-**32 项全过**代表三端真的接上了。其中 7 项是**反例**（故意构造的越权/非法输入）：
+**34 项全过**代表三端真的接上了。其中 7 项是**反例**（故意构造的越权/非法输入）：
 就诊归属不符必须 404（挡 IDOR）、非法枚举值必须 400、患者令牌访问后台必须 403、
 `demo-login-enabled=false` 时写死的账号必须登不进去。
+
+另有 3 项是**"改回旧实现就必须转红"的断言**（它们盯的是"不报错但结果错"的缺陷）：
+
+| 断言 | 改回旧实现会怎样 |
+|---|---|
+| 灌 250 条审计后，今日问诊量仍按 `consult-start` 精确 +1 | 旧实现（最近 200 条内存筛）掉到 **0** → 转红 |
+| 查看患者档案留痕，且 `actor` 正确 | 去掉读审计埋点 → **命中 0 条** → 转红 |
+| `ask` 的 `inputSnapshot` 含问题原文并下发到后台 | 不下发该字段 → **命中 0 条** → 转红 |
+
+> ★ 这 3 条的断言都写成"**None 安全 + 命中计数**"：字段缺失或没记上时给出一条**清晰的失败**，
+> 而不是在断言表达式里抛 `TypeError`/`KeyError` 把整个套件带崩 —— 崩溃只会让人以为
+> "脚本坏了"，看不出是"口径/埋点错了"。
 
 > 脚本会**并发**多起一个后端进程（演示账号关闭）来跑最后那条反例 ——
 > 只看代码不看行为，正是"默认开着、生产忘了关"这类事故的成因。
@@ -480,7 +511,7 @@ python -m pasm_medical.mcp.server --selftest
 # 认知服务端到端（真起 HTTP，17 项）
 python tools/e2e_medical_service.py
 
-# ★ 三端联调（认知服务 + Spring Boot + 前端契约，32 项；含 7 项越权/非法输入反例）
+# ★ 三端联调（认知服务 + Spring Boot + 前端契约，34 项；含 7 项越权/非法输入反例）
 #   前置：cd backend && mvn -DskipTests package
 python tools/e2e_stack.py
 
@@ -539,7 +570,7 @@ Python 进程里，由 `PASM_MEDICAL_LLM*` 环境变量决定。两者不一致�
 | 项 | 状态 |
 |---|---|
 | Python 认知服务（问诊树 / 检验单 / 护栏 / 隔离） | ✅ 已实现并验证（88 + 17 + 5 项） |
-| MCP stdio sidecar（`pasm_medical/mcp/`） | ✅ 已建并验证（selftest 24 项 + 三端 e2e 32 项）；复用 `MedicalService` 门面，不启 HTTP 零端口污染 |
+| MCP stdio sidecar（`pasm_medical/mcp/`） | ✅ 已建并验证（selftest 24 项 + 三端 e2e 34 项）；复用 `MedicalService` 门面，不启 HTTP 零端口污染 |
 | Spring Boot 业务层 | ✅ 已编译、已启动、三端联调全过；JPA 持久化（患者 / 就诊 / 审计 / **对接设置**）+ 真实管理接口（`/api/admin/*`、`/api/patient`、`/api/patient/encounters`、`/api/patient/encounter/{id}`、`/api/admin/config`）；**后台限 `ROLE_STAFF`** |
 | 前端 | ✅ 三栏工作台 + 医护后台，**全部接通真实后端**（登录 / 问诊 / 检验单 / 反馈 / 患者档案 / 历史就诊详情 / 后台患者·统计·审计·对接设置），构建通过、零 TS 错误 |
 | 影像 | ❌ 不做分析，只归档 + 转交 |

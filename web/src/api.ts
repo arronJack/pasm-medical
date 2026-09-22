@@ -95,10 +95,26 @@ export const api = {
     call<{ ref: string; name: string; allergy: string; chronic: string; encounterCount: number; last: string; dept: string; urgency: string }[]>(
       '/admin/patients'),
 
-  /** 后台：审计（append-only，最近 200 条）。 */
+  /**
+   * 后台：审计（append-only，最近 200 条）。
+   *
+   * `inputSnapshot` 是这次操作的输入快照 —— 问答（`ask`）时里面就是**患者问题的原文**，
+   * 读类事件里是 `ref=… / encounterId=…`。它超过 300 字会被截断，`inputTruncated` 标明
+   * 「这是截断后的」，别把省略号当成用户输入的原文。
+   */
   adminAudit: () =>
-    call<{ time: string; ref: string; actor: string; action: string; evidenceCount: number; modelVersion: string; refused: boolean }[]>(
-      '/admin/audit'),
+    call<{
+      id: number
+      time: string
+      ref: string
+      actor: string
+      action: string
+      evidenceCount: number
+      modelVersion: string
+      refused: boolean
+      inputSnapshot: string
+      inputTruncated: boolean
+    }[]>('/admin/audit'),
 
   /**
    * 后台：运营统计。

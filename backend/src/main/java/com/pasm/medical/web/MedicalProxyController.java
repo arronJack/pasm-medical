@@ -53,6 +53,8 @@ public class MedicalProxyController {
 
     @GetMapping("/encounters")
     public ResponseEntity<Map<String, Object>> encounters(@RequestParam String patientRef) {
+        audit.recordRead(AuditService.currentActor(null), patientRef, "read-timeline",
+                "patientRef=" + patientRef);
         JsonNode r = cog.get("/api/encounters", Map.of("patientRef", patientRef));
         return ResponseEntity.ok(Map.of(
                 "encounters", r.path("encounters"),
@@ -62,6 +64,8 @@ public class MedicalProxyController {
     /** 患者档案（业务层视图）：过敏史 / 慢病这类高优先级事实来自结构化字段。 */
     @GetMapping("/patient")
     public ResponseEntity<Map<String, Object>> patient(@RequestParam String ref) {
+        // ★ 先记审计再看（含 404 的尝试）—— 见 AuditService.recordRead 的说明
+        audit.recordRead(AuditService.currentActor(null), ref, "read-patient", "ref=" + ref);
         Patient p = patients.findById(ref);
         if (p == null) {
             return ResponseEntity.notFound().build();
@@ -79,6 +83,7 @@ public class MedicalProxyController {
     /** 该患者的历史就诊（业务库真实数据源，而非前端硬编码）。 */
     @GetMapping("/patient/encounters")
     public ResponseEntity<List<Map<String, Object>>> patientEncounters(@RequestParam String ref) {
+        audit.recordRead(AuditService.currentActor(null), ref, "read-encounters", "ref=" + ref);
         ZoneId z = ZoneId.systemDefault();
         List<Map<String, Object>> out = encounters.byPatient(ref).stream().map(e -> {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -106,6 +111,9 @@ public class MedicalProxyController {
     @GetMapping("/patient/encounter/{id}")
     public ResponseEntity<Map<String, Object>> patientEncounter(
             @PathVariable Long id, @RequestParam String ref) {
+        // 归属不符时下面会 404，但"谁试图看过哪条就诊"已经留痕（IDOR 探测正是靠这个发现）
+        audit.recordRead(AuditService.currentActor(null), ref, "read-encounter",
+                "ref=" + ref + ";encounterId=" + id);
         Encounter e = encounters.findForPatient(ref, id);
         if (e == null) {
             return ResponseEntity.notFound().build();
@@ -216,6 +224,8 @@ public class MedicalProxyController {
                               JsonNode r) {
         AiAudit a = new AiAudit();
         a.setPatientRef(patientRef);
+        // ★ 带上操作者：以前这条是空的，审计面板的"操作者"列常年空白 —— 那样"谁问的"就查不出来
+        a.setActor(AuditService.currentActor(null));
         a.setAction(actionOf(path, r));
         a.setModelVersion("pasm-cognition");
         // 依据条数：检验单看 items，问诊红旗看 red_flags，其余留空

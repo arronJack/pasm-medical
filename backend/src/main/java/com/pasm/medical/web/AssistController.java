@@ -118,6 +118,7 @@ public class AssistController {
     private void auditAsk(String patientRef, String question, int evidenceCount) {
         AiAudit a = new AiAudit();
         a.setPatientRef(patientRef);
+        a.setActor(AuditService.currentActor(null));
         a.setAction("ask");
         a.setEvidenceCount(evidenceCount);
         a.setModelVersion("cognition-recall");
@@ -129,6 +130,7 @@ public class AssistController {
                           String model, String snapshot) {
         AiAudit a = new AiAudit();
         a.setPatientRef(patientRef);
+        a.setActor(AuditService.currentActor(null));
         a.setAction(action);
         a.setEvidenceCount(evidenceCount);
         a.setModelVersion(model);
