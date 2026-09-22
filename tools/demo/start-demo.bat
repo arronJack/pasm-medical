@@ -50,6 +50,9 @@ REM A writable directory OUTSIDE this repository: used as the cwd for the
 REM import check and for scratch files. Do NOT use %SystemRoot% here - writing
 REM into C:\Windows needs administrator rights, and the java version probe below
 REM would then fail with "cannot read the java version" (we hit exactly that).
+REM NOTE: %TEMP% may contain spaces ("C:\Users\Zhang San\AppData\..."), so the
+REM fallback probe pushes into it and uses a bare file name instead of a quoted
+REM path - see the java probe below for why quoted paths are a trap there.
 set "NEUTRAL=%TEMP%"
 if not defined NEUTRAL set "NEUTRAL=%USERPROFILE%"
 if not defined NEUTRAL set "NEUTRAL=%CD%"
@@ -95,19 +98,50 @@ if defined PASM_MEDICAL_JAVA if exist "%PASM_MEDICAL_JAVA%" set "JAVA=%PASM_MEDI
 if not defined JAVA if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA=%JAVA_HOME%\bin\java.exe"
 if not defined JAVA for /f "delims=" %%J in ('where java 2^>nul') do if not defined JAVA set "JAVA=%%J"
 if not defined JAVA goto miss_java
-REM java -version writes to stderr. Do NOT embed a possibly-quoted path inside
-REM "for /f ('...')": cmd strips the wrong quotes there and tries to run e.g.
-REM 'D:/Program' (we hit exactly that). Redirect to a file first, then parse it.
+REM Two ways to learn the java version, tried in this order.
+REM
+REM PRIMARY: read the JDK's own release file. <java_home>\release holds
+REM   JAVA_VERSION="17.0.7" (it is NOT the first line - IMPLEMENTOR comes first,
+REM   so do not try to grab line 1). "for /f usebackq in ("file") reads the file
+REM   with cmd builtins only: no child process, no temp file, no console, and no
+REM   dependence on the console code page.
+REM WHY THIS MATTERS: "java -version" prints NOTHING AT ALL when this script runs
+REM   without a console (started detached by a scheduler, a build tool, or a
+REM   background task). The redirect file is created and stays 0 bytes, so the old
+REM   probe bailed out with "cannot read the java version" even on a perfect JDK.
+REM   Measured 2026-09-22: parent DETACHED_PROCESS -> 0 bytes of java output;
+REM   parent CREATE_NO_WINDOW / CREATE_NEW_CONSOLE / plain console -> full output.
 set "JV="
-set "JVFILE=%NEUTRAL%\pasm-medical-java-version.txt"
+set "JSRC=release file"
+if not exist "%JAVA%\..\..\release" set "JSRC=java -version"
+if not "%JSRC%"=="release file" goto java_probe_cmd
+for /f "usebackq tokens=1,* delims==" %%A in ("%JAVA%\..\..\release") do if not defined JV if /i "%%A"=="JAVA_VERSION" set "JV=%%B"
+if defined JV set JV=%JV:"=%
+if not defined JV set "JSRC=java -version"
+if not "%JSRC%"=="release file" goto java_probe_cmd
+goto java_probe_done
+
+REM FALLBACK: for a shim JDK without a release file next to it (e.g. an Oracle
+REM JavaSoft javapath entry). Do NOT embed a possibly-quoted path inside
+REM "for /f ('...')": cmd strips the wrong quotes there and tries to run e.g.
+REM 'D:/Program' (we hit exactly that). Redirect to a file first, then parse it -
+REM and pushd into the scratch dir so the parsed name has no spaces to quote.
+:java_probe_cmd
+set "JSRC=java -version"
+set "JV="
+pushd "%NEUTRAL%"
+set "JVFILE=pasm-medical-java-version.txt"
 "%JAVA%" -version > "%JVFILE%" 2>&1
 for /f "tokens=3" %%V in ('findstr /i "version" "%JVFILE%"') do if not defined JV set "JV=%%~V"
+popd
+
+:java_probe_done
 if not defined JV goto java_odd
 set "MAJ=%JV:~0,2%"
 if "%MAJ%"=="1." set "MAJ=%JV:~2,1%"
 if not defined MAJ goto java_odd
 if %MAJ% LSS 17 goto java_old
-echo [OK] java    %JAVA%  version %JV%
+echo [OK] java    %JAVA%  version %JV%  (%JSRC%)
 
 REM ---------- preflight: node and web dependencies ----------
 set "NODE="
@@ -130,6 +164,7 @@ echo [OK] token   %TOKEN_SRC%
 if not exist "%DATADIR%" mkdir "%DATADIR%" >nul 2>&1
 
 REM ---------- port scan ----------
+REM Each probe spawns python once; python is already a hard prerequisite here.
 echo.
 echo -- port status --
 call :portstate 8090
@@ -153,7 +188,14 @@ echo [1/3] cognition service :8090 already listening - skipped
 
 if defined P8081 goto skip8081
 echo [2/3] starting backend layer :8081 ...
-start "pasm-medical 2of3 backend 8081" /D "%REPO%\backend" "%JAVA%" -Dfile.encoding=UTF-8 -jar "%JAR%" --spring.profiles.active=dev
+REM Pass --server.port explicitly. Spring Boot's relaxed binding maps an ambient
+REM SERVER__PORT / SERVER_PORT env var onto server.port, and environment properties
+REM outrank application.yml - so the service can silently move away from the port
+REM this script announces, health-checks and stops by. Measured 2026-09-22: some
+REM tool exported SERVER__PORT=59637 and Tomcat tried 59637 and died with
+REM "Port 59637 was already in use", which reads like a port conflict but is not.
+REM A command-line argument outranks the environment, so pin it here.
+start "pasm-medical 2of3 backend 8081" /D "%REPO%\backend" "%JAVA%" -Dfile.encoding=UTF-8 -jar "%JAR%" --spring.profiles.active=dev --server.port=8081
 goto after8081
 :skip8081
 echo [2/3] backend layer :8081 already listening - skipped
@@ -168,7 +210,8 @@ echo [3/3] web workbench :5173 already listening - skipped
 :after5173
 
 REM ---------- wait for the web workbench ----------
-REM each round costs about 1-3 s: netstat scan plus a 1 s ping
+REM each round costs about 1-2 s: one python port probe plus a 1 s ping.
+REM Keep this loop tolerant: python startup alone is 0.1-0.3 s per round.
 echo.
 echo waiting for the web workbench, polling :5173 - up to about 2 minutes ...
 set /a TRIES=0
@@ -181,6 +224,21 @@ ping -n 2 127.0.0.1 >nul
 goto waitloop
 
 :ready
+REM Grace period before reporting. Vite is ready in about 2 s while Spring Boot
+REM needs roughly 15 s more, so summarising the moment :5173 answers printed
+REM "backend port 8081 : NOT ready" for a service that was merely still booting -
+REM a false alarm that sends people looking for errors that are not there.
+set /a GRACE=0
+:graceloop
+call :portstate 8090 >nul
+call :portstate 8081 >nul
+if defined P8090 if defined P8081 goto report
+set /a GRACE+=1
+if %GRACE% GEQ 25 goto report
+ping -n 2 127.0.0.1 >nul
+goto graceloop
+
+:report
 echo.
 echo ==================== startup result ====================
 call :probe 8090 cognition
@@ -219,8 +277,20 @@ goto done
 
 REM ---------- subroutines ----------
 :portstate
+REM Probe one TCP port by connecting to it. Reads ONLY the exit code: no pipe, no
+REM console, no netstat, and no dependence on the word "LISTENING" (netstat is
+REM localized) or on any child-process OUTPUT.
+REM WHY: "netstat -ano | findstr LISTENING" was used here before, and it is unusable
+REM when this script has no console (started detached by a scheduler or a build
+REM tool). Measured 2026-09-22 with a DETACHED_PROCESS parent: netstat -ano wrote
+REM 0 bytes (28507 bytes with a console), and piping into findstr can block forever
+REM ("echo x | findstr x" never returned). The launcher then HUNG on this line
+REM instead of failing - the worst possible failure mode.
+REM NOTE: an exit-code-only probe is console-proof; the python import check above
+REM kept working in that same detached run, which is how we found the pattern.
 set "P%1="
-netstat -ano | findstr /c:":%1 " | findstr /i "LISTENING" >nul
+set "PYARGS=import socket,sys;s=socket.socket();s.settimeout(0.5);r=s.connect_ex(('127.0.0.1',int(sys.argv[1])));s.close();sys.exit(0 if r==0 else 1)"
+"%PY%" -c "%PYARGS%" %1
 if errorlevel 1 goto :eof
 set "P%1=1"
 echo   port %1 is already in use
@@ -286,6 +356,10 @@ goto die
 :java_odd
 echo [X] cannot read the java version of %JAVA%
 echo     run "%JAVA%" -version yourself, or set PASM_MEDICAL_JAVA
+echo     if that command prints nothing, this script was started WITHOUT A
+echo     CONSOLE (scheduler / build tool / background task) - open a real
+echo     command window and run it there, or set PASM_MEDICAL_JAVA to a JDK 17
+echo     whose release file sits at ^<java_home^>\release
 goto die
 
 :miss_node
