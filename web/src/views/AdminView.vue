@@ -243,12 +243,31 @@ async function load() {
       api.adminPatients(), api.adminStats(), api.adminAudit(),
     ])
     patients.value = ps as PatientRow[]
-    const s = st as Record<string, number>
+    // ★ 口径写在卡片说明里：数字脱离口径无法核对，光给个 0.12 谁也不知道它算的是什么。
+    // 用 unknown 而不是 number：这个响应里既有数字也有字符串（zone / windowFrom / definitions）
+    const s = st as Record<string, unknown>
+    const n = (k: string) => Number(s[k] ?? 0)
     stats.value = [
-      { label: '今日问诊量', value: s.consultToday ?? 0, note: '含预问诊与问诊结束' },
-      { label: '红旗命中', value: s.redFlags ?? 0, note: '安全指标，优先关注' },
-      { label: '拒答率', value: pct(s.refusalRate), note: '高说明资料库覆盖不足' },
-      { label: '建议采纳率', value: pct(s.adoptionRate), note: '来自医生「采纳/否决」反馈' },
+      {
+        label: '今日问诊量',
+        value: n('consultationsToday'),
+        note: `今日发起（按 consult-start 计，一次问诊算一次）· 已走完流程 ${n('consultationsFinishedToday')} · 累计 ${n('consultationsTotal')}`,
+      },
+      {
+        label: '今日红旗命中',
+        value: n('redFlagsToday'),
+        note: `今日触发红旗中断的次数 · 累计 ${n('redFlagsTotal')}（安全指标，优先关注）`,
+      },
+      {
+        label: '今日拒答率',
+        value: pct(n('refusalRateToday')),
+        note: `今日 ${n('refusalsToday')} / ${n('questionsToday')} 个问题无依据被拒 · 累计 ${pct(n('refusalRateTotal'))}；高说明资料库覆盖不足`,
+      },
+      {
+        label: '建议采纳率',
+        value: pct(n('adoptionRateTotal')),
+        note: `累计 采纳 /（采纳 + 否决），样本 ${n('feedbackTotal')} 次；用累计是因为单日反馈样本太小`,
+      },
     ]
     audit.value = (au as Record<string, unknown>[]).map(a => ({
       time: String(a.time), ref: String(a.ref), act: String(a.action),

@@ -101,35 +101,81 @@ public class AdminController {
         return ResponseEntity.ok(out);
     }
 
-    /** 运营统计：今日问诊量 / 红旗命中 / 拒答率 / 采纳率。 */
+    /**
+     * 运营统计。
+     *
+     * <p>★ <b>口径（每个数字都要说得出它数的是什么，否则就是一张好看的假表）</b>：
+     * <ul>
+     *   <li><b>一次问诊 = 一条 {@code consult-start} 审计事件。</b>
+     *       不是 {@code ask} —— 一次问诊要问十几轮，按问题数算会虚高好几倍；
+     *       也不是 {@code consult-finish} —— 红旗中断或患者直接关页面就没有 finish，按它算会漏掉。</li>
+     *   <li><b>今日窗口</b> = 本机时区的当天 00:00 起（窗口起点随响应一起返回，便于核对）。</li>
+     *   <li><b>率类指标</b>：拒答率用今日窗口（分子分母同窗口）；采纳率用累计
+     *       —— 一天的医生反馈样本太小，天天在 0% / 100% 之间跳没有意义。</li>
+     * </ul>
+     *
+     * <p>⚠️ 旧实现是「取最近 200 条审计 → 在内存里筛今天、把 ask 与 consult-finish 都算一次」，
+     * 有两个错：审计超过 200 条就**静默封顶**，且一次问诊被重复计数。修好后有断言盯着这条
+     * （{@code tools/e2e_stack.py} 先灌 250 条审计，再起一次问诊，要求计数**精确 +1**）。
+     */
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> stats() {
-        List<AiAudit> recent = audits.findTop200ByOrderByOccurredAtDesc();
-        LocalDate today = LocalDate.now();
         ZoneId z = ZoneId.systemDefault();
-        long consultToday = recent.stream().filter(a -> {
-            String act = a.getAction();
-            if (!"ask".equals(act) && !"consult-finish".equals(act)) {
-                return false;
-            }
-            return a.getOccurredAt().atZone(z).toLocalDate().equals(today);
-        }).count();
-        long redFlags = audits.countByAction("consult-redflag");
-        long askTotal = audits.countByAction("ask");
-        long askRefused = audits.countByActionAndRefusedTrue("ask");
+        LocalDate today = LocalDate.now(z);
+        Instant from = today.atStartOfDay(z).toInstant();
+
+        long consultStartedToday =
+                audits.countByActionAndOccurredAtGreaterThanEqual("consult-start", from);
+        long consultFinishedToday =
+                audits.countByActionAndOccurredAtGreaterThanEqual("consult-finish", from);
+        long redFlagsToday =
+                audits.countByActionAndOccurredAtGreaterThanEqual("consult-redflag", from);
+        long questionsToday = audits.countByActionAndOccurredAtGreaterThanEqual("ask", from);
+        long refusalsToday =
+                audits.countByActionAndRefusedTrueAndOccurredAtGreaterThanEqual("ask", from);
+
+        long consultStartedTotal = audits.countByAction("consult-start");
+        long redFlagsTotal = audits.countByAction("consult-redflag");
+        long questionsTotal = audits.countByAction("ask");
+        long refusalsTotal = audits.countByActionAndRefusedTrue("ask");
         long adopt = audits.countByAction("feedback-adopt");
         long reject = audits.countByAction("feedback-reject");
-        double refusalRate = askTotal > 0 ? (double) askRefused / askTotal : 0.0;
-        double adoptionRate = (adopt + reject) > 0 ? (double) adopt / (adopt + reject) : 0.0;
 
         Map<String, Object> m = new java.util.LinkedHashMap<>();
-        m.put("consultToday", consultToday);
-        m.put("redFlags", redFlags);
-        m.put("refusalRate", Math.round(refusalRate * 100) / 100.0);
-        m.put("adoptionRate", Math.round(adoptionRate * 100) / 100.0);
-        m.put("askTotal", askTotal);
+        // 窗口本身也要返回：数字脱离窗口就无法核对
+        m.put("zone", z.getId());
+        m.put("windowFrom", from.atZone(z).toString());
+        m.put("windowTo", Instant.now().atZone(z).toString());
+        // 今日
+        m.put("consultationsToday", consultStartedToday);
+        m.put("consultationsFinishedToday", consultFinishedToday);
+        m.put("redFlagsToday", redFlagsToday);
+        m.put("questionsToday", questionsToday);
+        m.put("refusalsToday", refusalsToday);
+        m.put("refusalRateToday", ratio(refusalsToday, questionsToday));
+        // 累计
+        m.put("consultationsTotal", consultStartedTotal);
+        m.put("redFlagsTotal", redFlagsTotal);
+        m.put("questionsTotal", questionsTotal);
+        m.put("refusalRateTotal", ratio(refusalsTotal, questionsTotal));
         m.put("feedbackTotal", adopt + reject);
+        m.put("adoptionRateTotal", ratio(adopt, adopt + reject));
+        // 口径随数据一起给出去，避免前端各写一版说明、各理解一套
+        Map<String, String> defs = new java.util.LinkedHashMap<>();
+        defs.put("consultation", "一次问诊 = 一条 consult-start 审计事件（不是 ask，也不是 finish）");
+        defs.put("todayWindow", "本机时区当天 00:00 起（见 windowFrom）");
+        defs.put("refusalRate", "今日窗口内 无依据拒答的问题数 / 今日全部问题数");
+        defs.put("adoptionRate", "累计 采纳 / （采纳 + 否决）；用累计是因为一天的反馈样本太小");
+        m.put("definitions", defs);
         return ResponseEntity.ok(m);
+    }
+
+    /** 保留两位小数的比率。分母为 0 时返回 0 —— 不能返回 NaN，JSON 里的 NaN 会让前端解析失败。 */
+    private static double ratio(long numerator, long denominator) {
+        if (denominator <= 0) {
+            return 0.0;
+        }
+        return Math.round((double) numerator / denominator * 100) / 100.0;
     }
 
     // ─────────────────────────────────────────── 对接设置（可读可写）

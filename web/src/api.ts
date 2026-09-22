@@ -100,10 +100,32 @@ export const api = {
     call<{ time: string; ref: string; actor: string; action: string; evidenceCount: number; modelVersion: string; refused: boolean }[]>(
       '/admin/audit'),
 
-  /** 后台：运营统计（今日问诊量 / 红旗命中 / 拒答率 / 采纳率）。 */
+  /**
+   * 后台：运营统计。
+   *
+   * ★ 字段名带今日/累计后缀，**故意不再用含糊的 `consultToday` / `refusalRate`** ——
+   * 旧字段名让同一个面板里"今日"和"全时段"两种口径看起来一样，读代码的人必然误判。
+   * 口径定义随响应返回（`definitions`），界面直接展示，避免前端各写一版说明。
+   */
   adminStats: () =>
-    call<{ consultToday: number; redFlags: number; refusalRate: number; adoptionRate: number; askTotal: number; feedbackTotal: number }>(
-      '/admin/stats'),
+    call<{
+      zone: string
+      windowFrom: string
+      windowTo: string
+      consultationsToday: number
+      consultationsFinishedToday: number
+      redFlagsToday: number
+      questionsToday: number
+      refusalsToday: number
+      refusalRateToday: number
+      consultationsTotal: number
+      redFlagsTotal: number
+      questionsTotal: number
+      refusalRateTotal: number
+      feedbackTotal: number
+      adoptionRateTotal: number
+      definitions: Record<string, string>
+    }>('/admin/stats'),
 
   /**
    * 后台：对接设置（读）。

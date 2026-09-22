@@ -133,7 +133,7 @@ python -m pasm_medical.domain            # 领域模型（隔离规则 / 去标�
 python -m pasm_medical.safety            # 护栏（红线）
 python -m pasm_medical.mcp.server --selftest   # MCP sidecar，24 项
 python tools/e2e_medical_service.py      # 真起 HTTP 服务，17 项
-python tools/e2e_stack.py                # 三端联调，31 项（需先 mvn package）
+python tools/e2e_stack.py                # 三端联调，32 项（需先 mvn package）
 python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被抓到
 python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约 + 真跑 --check
 ```
@@ -150,11 +150,11 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 | **前端（`web/`）** | ✅ **构建通过**（vue-tsc 类型检查 + vite）；登录页 / 三栏工作台 / 医护后台，全部接通真实后端 |
 | **Spring Boot 业务层** | ✅ **编译 + 启动 + 三端联调通过**（JDK 18 / Maven 3.8.6）；登录鉴权（默认关闭演示账号）/ 薄转发 / 认知客户端；**JPA 持久化**（患者 / 就诊 / 审计 / 对接设置）+ 管理接口 `/api/admin/*`、`/api/patient/*` |
 | **授权与越权防护** | ✅ 后台限 `ROLE_STAFF`（患者令牌 403）；就诊详情做**归属校验**（挡 IDOR）；对接设置**服务端白名单校验** |
-| 三端联调 | ✅ `tools/e2e_stack.py` **31 项全过**（含 7 项越权/非法输入反例；3 个安全判据已做反向验证） |
+| 三端联调 | ✅ `tools/e2e_stack.py` **32 项全过**（含 7 项越权/非法输入反例；3 个安全判据已做反向验证） |
 | 影像归档 | 未开始（P5，**只做归档与转交，不做分析**） |
 | 中医知识库 | 未开始（见 `docs/PLAN.md` §6） |
 
-**已验证的规模**：模块自检 **88 项** + MCP selftest **24 项** + 端到端 **17 项** + 反例对照 **5 项** + 三端联调 **31 项**（全部通过）。
+**已验证的规模**：模块自检 **88 项** + MCP selftest **24 项** + 端到端 **17 项** + 反例对照 **5 项** + 三端联调 **32 项**（全部通过）。
 
 > **启动、部署、配置、排障**见 [`docs/GUIDE.md`](docs/GUIDE.md)；
 > **功能说明**（每个功能在做什么、边界在哪）也在同一份文档里。

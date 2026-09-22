@@ -252,9 +252,31 @@ def main() -> int:                                # noqa: C901
         check("★ 后台 /api/admin/patients 返回真实患者列表",
               st == 200 and isinstance(d, list) and len(d) >= 1, str(d)[:160])
 
-        st, d = req("GET", base + "/api/admin/stats", token=token)
-        check("★ 后台 /api/admin/stats 返回统计（拒答率/采纳率）",
-              st == 200 and "refusalRate" in d and "adoptionRate" in d, str(d)[:160])
+        # ★★ 统计口径（这两条针对一个真 bug，别把它们改回"只看字段在不在"）
+        #   旧实现 = 「取最近 200 条审计 → 在内存里筛今天、把 ask 与 consult-finish 都算一次」：
+        #     ① 审计一多就**静默封顶**；② 一次问诊被重复计数。两者都不报错，只给假数字。
+        st, s1 = req("GET", base + "/api/admin/stats", token=token)
+        check("★ /api/admin/stats 返回统计 + 口径定义 + 统计窗口（数字必须能核对）",
+              st == 200 and "refusalRateToday" in s1 and "adoptionRateTotal" in s1
+              and bool((s1.get("definitions") or {}).get("consultation"))
+              and bool(s1.get("windowFrom")),
+              str(s1)[:220])
+
+        # 先把"最近 200 条"填满（用 login：每次一条审计、不依赖认知服务，最快），
+        # 再起一次问诊，要求今日问诊量**精确 +1**。旧实现在这里会给出 0（top200 里全是 login）。
+        for _ in range(250):
+            req("POST", base + "/api/auth/login", {"username": "staff", "password": "123456"})
+        st, s2 = req("GET", base + "/api/admin/stats", token=token)
+        before = s2.get("consultationsToday")
+        req("POST", base + "/api/consult/start",
+            {"patientRef": "stats-probe", "chiefComplaint": "咳嗽三天"}, token=token)
+        st, s3 = req("GET", base + "/api/admin/stats", token=token)
+        after = s3.get("consultationsToday")
+        # None 安全：字段缺失（旧实现根本没有这个键）时要**清晰地转红**，而不是在断言里抛
+        # TypeError 把整个套件带崩 —— 崩溃只会让人以为是脚本坏了，看不出是口径错了。
+        counts_ok = isinstance(before, int) and isinstance(after, int) and after == before + 1
+        check("★ 反例：灌 250 条审计后，今日问诊量仍按 consult-start 精确 +1（旧实现会掉到 0）",
+              counts_ok, "before=%s after=%s" % (before, after))
 
         st, d = req("GET", base + "/api/admin/audit", token=token)
         check("★ 后台 /api/admin/audit 返回审计（append-only）",
