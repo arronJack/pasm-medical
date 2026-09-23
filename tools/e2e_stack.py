@@ -473,6 +473,18 @@ def main() -> int:                                # noqa: C901
                         {"title": "不应写入", "content": "x", "tags": ["x"]}, token=dtoken)
             check("★ 反例：科室角色写资料库 → 403（资料库是全院依据，属超管）",
                   st == 403, str(st))
+            # ★ 反例：资料库的"写/停用/删除/同步"全部仅超管。现有测试只验了新建，
+            #   但停用/删除/同步同样能影响全院回答依据，必须同样挡在 403。
+            #   （SecurityConfig 把整个 /api/admin/kb/** 限 ROLE_STAFF，鉴权在控制器之前，
+            #    所以即便 key 不存在也先 403，不会退化成 404。）
+            kb_probe = kb_key or "probe-doc-key"
+            st, d = req("POST", base + "/api/admin/kb/%s/status" % kb_probe,
+                        {"active": False}, token=dtoken)
+            check("★ 反例：科室角色停用资料库条目 → 403", st == 403, str(st))
+            st, d = req("DELETE", base + "/api/admin/kb/%s" % kb_probe, token=dtoken)
+            check("★ 反例：科室角色删除资料库条目 → 403", st == 403, str(st))
+            st, d = req("POST", base + "/api/admin/kb/sync", token=dtoken)
+            check("★ 反例：科室角色手动同步资料库 → 403", st == 403, str(st))
         st, d = req("GET", base + "/api/admin/patients", token=token)
         refs_all = [x.get("ref") for x in d] if isinstance(d, list) else []
         check("★ 超管看全院：两位演示患者都在",
