@@ -137,6 +137,12 @@
           <span>{{ triage.suggested_department || '全科门诊' }}</span>
         </div>
         <p class="note">{{ triage.advice }}</p>
+        <div v-if="!triageResolved" class="actions">
+          <button @click="resolveTriage('adopt')">采纳</button>
+          <button @click="resolveTriage('modify')">修改</button>
+          <button @click="resolveTriage('reject')">否决</button>
+        </div>
+        <div v-else class="resolved">已处置：{{ triageResolved }}</div>
       </div>
 
       <div v-if="labItems.length" class="card">
@@ -184,6 +190,8 @@ interface Msg {
   evidence?: Evidence[]
   refused?: boolean
   resolved?: string
+  /** 问题消息携带的 key —— 反馈时拼成 ask:<key> 写进医学动作后验（P0.5）。 */
+  qkey?: string
   /** 历史就诊的结构化详情（点开历史记录时拉取）。 */
   encounter?: EncounterDetail
 }
@@ -286,7 +294,7 @@ function applyState(st: ConsultState) {
       text: '发现需要立即处理的警示信号，问诊已中止。' + st.triage.advice,
     })
   } else if (st.question) {
-    messages.value.push({ role: 'assistant', text: st.question.text })
+    messages.value.push({ role: 'assistant', text: st.question.text, qkey: st.question.key })
   }
 }
 
@@ -353,13 +361,41 @@ async function confirmLab() {
   }
 }
 
-/** 采纳 / 修改 / 否决 —— 必须上报后端，这是最高质量的学习信号 */
-async function resolve(m: Msg, kind: string, action: string) {
-  m.resolved = action
+/** 处境 context（P0.5）：complaint=主诉;age_band=儿童/成年/老年/未知;redflag=有/无 */
+function ageBand(): string {
+  const a = patient.value.age
+  if (a == null) return '未知'
+  if (a < 18) return '儿童'
+  if (a >= 65) return '老年'
+  return '成年'
+}
+function feedbackContext(): string {
+  const cc = state.value?.chiefComplaint || ''
+  const redflag = redFlags.value.length > 0 ? '有' : '无'
+  return 'complaint=' + cc + ';age_band=' + ageBand() + ';redflag=' + redflag
+}
+
+/** 采纳 / 修改 / 否决 —— P0.5 改接到医学动作后验（ask:<问题key>）。 */
+async function resolve(m: Msg, kind: string, decision: string) {
+  m.resolved = decision
+  // 问题消息 → ask:<key>；其它 AI 消息没具体建议 → 不更新后验，仅留审计
+  const medicalAction = m.qkey ? 'ask:' + m.qkey : ''
   try {
-    await api.feedback(patient.value.ref, kind, action)
+    await api.feedback(patient.value.ref, decision, medicalAction, feedbackContext())
   } catch {
-    m.resolved = action + '（上报失败，请重试）'
+    m.resolved = decision + '（上报失败，请重试）'
+  }
+}
+
+/** 分诊建议卡片的采纳 / 修改 / 否决 —— P0.5 核心：medicalAction = triage:<科室>。 */
+const triageResolved = ref<string>('')
+async function resolveTriage(decision: string) {
+  triageResolved.value = decision
+  const dept = triage.value?.suggested_department || '全科门诊'
+  try {
+    await api.feedback(patient.value.ref, decision, 'triage:' + dept, feedbackContext())
+  } catch {
+    triageResolved.value = decision + '（上报失败，请重试）'
   }
 }
 

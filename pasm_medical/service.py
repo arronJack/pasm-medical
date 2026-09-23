@@ -29,6 +29,7 @@ from .consult import ConsultEngine, ConsultSession
 from .lab import LabReport, OcrEngine
 from .domain import (Encounter, agent_id_for, allergy_memory, critical_memory,
                      scrub_identifiers)
+from .learning import MedicalPosterior, ACTION_PREFIXES
 
 try:                                    # 相关性闸门（pasm-skills >= 0.6.2）
     from pasm_skills.cognition import relevance
@@ -43,6 +44,18 @@ DOC_SOURCE = "pasm-medical"
 
 #: 清理资料条目需要的插件内部字段（见 _purge_medical_docs 的说明）。
 _PURGE_ATTRS = ("_entries", "_save", "_lock", "_index_dirty")
+
+#: 分诊候选科室池（与 :meth:`ConsultSession.triage` 的规则映射同源，但此处用于
+#: 「后验排序」—— 把规则建议的科室 + 几个常见替代科室放进候选，让"否决某条建议后
+#: 排序可观测变化"有东西可排。新增科室请同步 :mod:`.consult` 的 triage 映射。
+_DEPARTMENT_POOL = [
+    "心内科 / 急诊内科", "急诊内科", "神经内科", "消化内科 / 普外科",
+    "普外科", "消化内科", "发热门诊 / 感染科", "感染科",
+    "呼吸内科", "耳鼻喉科", "全科门诊",
+]
+
+#: 合法反馈决策（与 Java ``FeedbackRequest`` / 审计动作 ``feedback-<decision>`` 对齐）。
+_VALID_DECISIONS = ("adopt", "modify", "reject")
 
 
 def _doc_key_of(entry: Dict[str, Any]) -> str:
@@ -99,10 +112,13 @@ class MedicalService:
     """
 
     def __init__(self, app: Any, *, tenant: str,
-                 consult_engine: Optional[ConsultEngine] = None) -> None:
+                 consult_engine: Optional[ConsultEngine] = None,
+                 posterior: Optional[MedicalPosterior] = None) -> None:
         self.app = app
         self.tenant = tenant
         self.engine = consult_engine or ConsultEngine()
+        #: ★ 医学动作后验（P0.5）—— 只在内存里跑也行（测试），生产由 build_service 落盘。
+        self.posterior = posterior or MedicalPosterior()
         #: ★ 进行中的问诊（进程内）。生产须落 Redis/DB —— 多实例下进程内状态会丢。
         self._consults: Dict[str, ConsultSession] = {}
         #: 待确认的检验单：report_key → (patient_ref, LabReport)
@@ -503,7 +519,77 @@ class MedicalService:
         return {"ok": True, "halted": s.halted, "red_flags": s.red_flags_hit,
                 "coverage": s.coverage(),
                 "question": (q.to_dict() if q else None),
-                "triage": s.triage() if s.halted else None}
+                "triage": s.triage(),
+                # ★ 暴露主诉给前端：triage 卡片的"采纳/修改/否决"按钮要靠它拼
+                #   medicalAction = triage:<suggested_department>，以及处境 context。
+                "chief_complaint": s.chief_complaint}
+
+    # ---------------------------------------------------------- 医学动作后验（P0.5）
+
+    def _rule_suggested_department(self, chief_complaint: str) -> str:
+        """规则侧（确定性）建议科室 —— 直接复用 :meth:`ConsultSession.triage`，
+        不重复维护一份映射（否则两处会分叉）。"""
+        if not chief_complaint:
+            return "全科门诊"
+        s = ConsultSession(self.engine, chief_complaint=chief_complaint)
+        return s.triage().get("suggested_department") or "全科门诊"
+
+    def feedback_medical(self, patient_ref: str, decision: str,
+                         medical_action: str, context: str) -> Dict[str, Any]:
+        """记录一次医学建议反馈并写入后验。
+
+        ★ 这是 P0.5 的核心改接点：原实现把反馈写进了**聊天动作池**（练错对象，
+        医学判断分毫未变）；这里改为写进**医学动作后验**，只影响「分诊候选排序」，
+        不碰任何安全规则 / 合规红线。
+
+        - ``decision ∈ {adopt, modify, reject}``：adopt → 成功；modify / reject → 非成功。
+        - 非法 decision → 返回 ``ok=False``（路由层据此回 400）。
+        - ``medical_action`` 为空（例如医生对一条"非具体建议"的 AI 消息点赞）→
+          **只留审计、不更新后验**，返回 ``ok=True`` 且 ``learned=False``。
+        """
+        if decision not in _VALID_DECISIONS:
+            return {"ok": False, "error": "invalid decision",
+                    "valid": list(_VALID_DECISIONS)}
+        if not medical_action or not medical_action.strip():
+            # 没有具体医学动作可学：仅审计，不碰后验（与聊天动作池继续零耦合）
+            return {"ok": True, "patient_ref": patient_ref, "decision": decision,
+                    "medical_action": "", "context": context, "learned": False}
+        success = (decision == "adopt")
+        obs = self.posterior.observe_op(medical_action, context, success)
+        if not obs.get("ok"):
+            return {"ok": False, "error": obs.get("error", "illegal action"),
+                    "valid_prefixes": list(ACTION_PREFIXES)}
+        return {"ok": True, "patient_ref": patient_ref, "decision": decision,
+                "medical_action": medical_action, "context": context,
+                "success": success, "learned": True,
+                "adoption_probability": obs.get("probability")}
+
+    def predict_op_medical(self, action: str, context: str) -> Dict[str, Any]:
+        """读后验：返回某 ``(动作, 处境)`` 的采纳概率（未观测 = 先验 0.5）。"""
+        return {"ok": True, "action": action, "context": context,
+                "adoption_probability": self.posterior.predict_op(action, context)}
+
+    def triage_candidates(self, chief_complaint: str, context: str) -> Dict[str, Any]:
+        """按后验概率排序的候选科室。
+
+        ★ 验收落点：医生否决一条 ``triage:<科室>`` 建议后，该科室在同一处境下的
+        采纳概率下降 → 排序后移，前端「分诊候选」顺序发生可观测变化；而聊天动作池
+        权重不变（反例对照见 ``tools/falsify_medical_learning.py``）。
+
+        候选集 = 规则建议科室 + 池中若干替代科室（保证 ≥2 条可排）。
+        排序：概率降序；同概率按候选集原始顺序（规则建议优先），保证确定性。
+        """
+        suggested = self._rule_suggested_department(chief_complaint)
+        pool = [suggested] + [d for d in _DEPARTMENT_POOL if d != suggested][:3]
+        scored = [(d, self.posterior.predict_op("triage:%s" % d, context))
+                  for d in pool]
+        scored.sort(key=lambda x: (-x[1], pool.index(x[0])))
+        return {"ok": True, "chief_complaint": chief_complaint, "context": context,
+                "suggested_department": suggested,
+                "candidates": [
+                    {"department": d, "adoption_probability": round(p, 4),
+                     "rule_suggested": d == suggested}
+                    for d, p in scored]}
 
     def observe_note(self, patient_ref: str, title: str, brief: str,
                      salience: int = 3) -> Dict[str, Any]:
@@ -682,6 +768,27 @@ def register_medical_routes(svc: "MedicalService") -> int:
             k=int(b.get("k") or 5),
             doc_keys={str(x) for x in keys} if isinstance(keys, list) else None)
 
+    # ★ P0.5 医学动作后验：把"医生采纳/修改/否决"从聊天动作池改接到医学动作后验。
+    #   这些路由**不在** `_RESERVED_PATHS`（如 /api/kb/stats）里，可安全 register_route；
+    #   仍走管理作用域（match_route 恒 need_admin=True），Spring Boot 带管理令牌调。
+    def _feedback(q, b):
+        r = svc.feedback_medical(
+            str(b.get("patientRef") or ""), str(b.get("decision") or ""),
+            str(b.get("medicalAction") or ""), str(b.get("context") or ""))
+        # 非法 decision → 400；其余（含空 action 仅审计）都是 200
+        return (400 if (not r.get("ok") and r.get("error") == "invalid decision")
+                else 200), r
+
+    def _feedback_predict(q, b):
+        action = str(q.get("action") or b.get("action") or "")
+        context = str(q.get("context") or b.get("context") or "")
+        return 200, svc.predict_op_medical(action, context)
+
+    def _triage_candidates(q, b):
+        complaint = str(q.get("chiefComplaint") or b.get("chiefComplaint") or "")
+        context = str(q.get("context") or b.get("context") or "")
+        return 200, svc.triage_candidates(complaint, context)
+
     routes = [
         ("POST", "/api/consult/start", _start),
         ("POST", "/api/consult/answer", _answer),
@@ -695,6 +802,10 @@ def register_medical_routes(svc: "MedicalService") -> int:
         ("POST", "/api/library/sync", _kb_sync),
         ("GET", "/api/library/stats", _kb_stats),
         ("POST", "/api/answer", _ask),
+        # —— P0.5 新增（医学动作后验）
+        ("POST", "/api/feedback", _feedback),
+        ("GET", "/api/feedback/predict", _feedback_predict),
+        ("GET", "/api/triage/candidates", _triage_candidates),
     ]
     for method, path, fn in routes:
         gw.register_route(method, path, fn)
@@ -722,6 +833,12 @@ def build_service(*, tenant: str, kb_dir: str, persist_dir: str,
     Path(kb_dir).mkdir(parents=True, exist_ok=True)
     Path(persist_dir).mkdir(parents=True, exist_ok=True)
 
+    # ★ P0.5 医学动作后验落盘：放在 workspace 下的独立 learning 子目录，
+    #   不混进 framework 的 cog 目录（那是认知记忆，别把"学习信号"和"患者记忆"串在一起）。
+    learning_dir = os.path.join(ws, "learning")
+    Path(learning_dir).mkdir(parents=True, exist_ok=True)
+    posterior = MedicalPosterior(os.path.join(learning_dir, "posterior.json"))
+
     app = SimpleApplication(
         agent_id="medical:%s" % tenant,
         persona={"name": "诊疗助手", "role": "临床辅助", "tone": "简洁、克制",
@@ -738,7 +855,7 @@ def build_service(*, tenant: str, kb_dir: str, persist_dir: str,
             }},
         },
     )
-    svc = MedicalService(app, tenant=tenant)
+    svc = MedicalService(app, tenant=tenant, posterior=posterior)
     register_medical_routes(svc)          # ★ 把医疗接口挂到网关
     return svc
 

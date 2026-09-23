@@ -130,19 +130,30 @@ public class PasmCognitionClient {
     }
 
     /**
-     * 医生对本次 AI 输出的反馈（采纳 / 修改 / 否决）。
+     * 医生对一条医学建议的采纳 / 修改 / 否决（P0.5 核心改接点）。
      *
-     * <p><b>这是最高质量的学习信号，比病历本身可靠得多</b> —— 病历只记录"结果"，
-     * 而"医生把这条 AI 建议否决了"直接标出了系统的错误。务必带上 {@code action}。
+     * <p>★ 原 {@code feedback} 把信号写进了<b>聊天动作池</b>（{@code /api/cog/feedback}，
+     * 练错对象 —— 医学判断分毫未变）。现在改为写进<b>医学动作后验</b>
+     * （{@code /api/feedback}），只影响「分诊候选排序」，不碰任何安全规则 / 合规红线。
+     *
+     * @param decision       adopt / modify / reject
+     * @param medicalAction  医学动作，形如 {@code triage:<科室>} / {@code ask:<问题key>} / {@code advise:<类别>}
+     * @param context        处境，形如 {@code complaint=咳嗽;age_band=成年;redflag=无}
      */
-    public JsonNode feedback(String patientRef, String kind, String action) {
+    public JsonNode feedbackMedical(String patientRef, String decision,
+                                   String medicalAction, String context) {
         var body = new java.util.HashMap<String, Object>();
-        body.put("agent_id", agentId(patientRef));
-        body.put("kind", kind);
-        if (action != null && !action.isBlank()) {
-            body.put("action", action);
+        body.put("patientRef", patientRef);
+        if (decision != null && !decision.isBlank()) {
+            body.put("decision", decision);
         }
-        return http.post().uri("/api/cog/feedback").body(body)
+        if (medicalAction != null && !medicalAction.isBlank()) {
+            body.put("medicalAction", medicalAction);
+        }
+        if (context != null && !context.isBlank()) {
+            body.put("context", context);
+        }
+        return http.post().uri("/api/feedback").body(body)
                 .retrieve().body(JsonNode.class);
     }
 

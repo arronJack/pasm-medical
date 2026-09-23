@@ -144,10 +144,16 @@ export const api = {
     call<{ ok: boolean; written: number }>('/lab/confirm', {
       method: 'POST', body: JSON.stringify({ reportKey, corrections, allItems: true }) }),
 
-  /** 采纳 / 修改 / 否决 —— 最高质量的学习信号，必须落到后端（不能只改 UI） */
-  feedback: (patientRef: string, kind: string, action: string) =>
-    call<{ ok: boolean }>('/assist/feedback', {
-      method: 'POST', body: JSON.stringify({ patientRef, kind, action }) }),
+  /** 采纳 / 修改 / 否决 —— P0.5 改接到医学动作后验（triage:<科室> / ask:<key> / advise:<类别>）。
+   *  medicalAction 为空时仅留审计、不更新后验。 */
+  feedback: (patientRef: string, decision: string, medicalAction: string, context: string) =>
+    call<{ ok: boolean; adoption_probability?: number }>('/assist/feedback', {
+      method: 'POST', body: JSON.stringify({ patientRef, decision, medicalAction, context }) }),
+
+  /** 分诊候选（按后验概率排序）：医生否决某条建议后，同处境下排序会变化。 */
+  triageCandidates: (chiefComplaint: string, context: string) =>
+    call<TriageCandidates>('/triage/candidates?chiefComplaint='
+      + encodeURIComponent(chiefComplaint) + '&context=' + encodeURIComponent(context)),
 
   /** 患者档案（业务层视图）：过敏史 / 慢病来自结构化字段。 */
   patient: (ref: string) =>
@@ -304,12 +310,21 @@ export interface AdminConfigView {
 
 export interface ConsultQuestion { key: string; text: string; why: string; from_tree: string }
 export interface Triage { urgency: string; advice: string; suggested_department?: string }
+export interface TriageCandidates {
+  ok: boolean
+  chief_complaint: string
+  context: string
+  suggested_department: string
+  candidates: { department: string; adoption_probability: number; rule_suggested: boolean }[]
+}
 export interface ConsultState {
   halted: boolean
   question: ConsultQuestion | null
   red_flags: { label: string; advice: string; urgency: string }[]
   triage: Triage | null
   coverage: { answered: number; total: number; ratio: number }
+  /** P0.5：主诉，供前端拼 triage:<科室> 与处境 context */
+  chiefComplaint?: string
 }
 export interface LabItem {
   name: string; raw_name: string; value: number | null; unit: string

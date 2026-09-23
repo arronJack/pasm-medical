@@ -110,10 +110,12 @@ reject 在动作池里 = False
 │  └──────────────────────────────────────┘             │
 │                                                       │
 │  ┌─ 学习面（只影响排序，不碰安全规则）──┐             │
-│  │ worldmodel.observe_op(动作, 处境, 成败)│           │
-│  │   triage:<科室> / ask:<问题key> /      │           │
-│  │   order:<检验项> / advise:<类别>       │           │
-│  │ → 候选排序表（分诊候选、提问顺序）      │           │
+│  │ learning.MedicalPosterior（自包含     │             │
+│  │   Beta-Bernoulli，绝不训练聊天动作池） │             │
+│  │   observe_op / predict_op             │             │
+│  │   triage:<科室> / ask:<问题key> /      │             │
+│  │   advise:<类别>                       │             │
+│  │ → 候选排序表（分诊候选、提问顺序）      │             │
 │  └──────────────────────────────────────┘             │
 └──────────────────────────────────────────────────────┘
 ```
@@ -141,17 +143,23 @@ reject 在动作池里 = False
 
 ★ 所以顺序是 **P1（身份→实体映射 + 角色 + 科室）→ 病例库 → 转人工（同样依赖科室路由）**。
 
-### 阶段 1：先修反馈作用面（小改动，高价值）
+### 阶段 1（★ 已完成 · 2026-09-22）：先修反馈作用面（P0.5）
 
-把 `adopt / reject / modify` 从**聊天动作池**改接到**医学动作后验**：
+把医生 `adopt / reject` 从**聊天动作池**改接到**自包含的医学动作后验** `pasm_medical/learning.py::MedicalPosterior`：
 
-- `POST /api/assist/feedback` 除了记审计，再调用 `observe_op(动作, 处境, 成功=采纳)`
-- 动作枚举改为医学语义：`triage:<科室>` / `ask:<问题key>` / `advise:<类别>`
-- 处境键用固定模板（与 `OP_CONTEXT` 同风格），如 `complaint=咳嗽;age_band=老年;redflag=无`
-- **不再对聊天动作池调用 `feedback`**（或仅在明确需要时，与医学信号分离）
+- **实现决策（与初稿偏差，已记录）**：框架 `CognitiveBackend` 当前只暴露 `feedback(kind, action)`（聊天动作池 `'greet','ask','share','teach','listen'`），`worldmodel.observe_op / predict_op` 尚未接入医疗认知栈；为 `worldmodel` 新开接线需改 `pasm-framework` + `pasm-skills` 并重发 PyPI，跨边界风险过高。
+  → **在 `pasm_medical`（Python 唯一实现层）自建自包含 Beta-Bernoulli 后验，绝不训练聊天动作池**。日后若框架补上 `observe_op`/`predict_op`，再把它替换进 `MedicalPosterior` 的 backend 即可，接口不用动。
+- 新增路由 `POST /api/feedback`（参数 `decision∈{adopt,reject}`、`medical_action`、`context`），非法 `decision` 返回 **400**；空 `medical_action` 视为无学习信号（`learned=False`）。
+  （初稿写的 `POST /api/assist/feedback` 与 `adopt/reject/modify` 调整为上述契约——`modify` 暂不在验收范围内，统一用 `adopt`/`reject` 表达成败。）
+- 动作枚举：医学语义 `triage:<科室>` / `ask:<问题key>` / `advise:<类别>`；处境键固定模板 `complaint=…;age_band=…;redflag=…`。
+- `GET /api/feedback/predict` 暴露后验均值；`GET /api/triage/candidates` 暴露分诊候选排序（规则科室 + 池前 3 替代表，按概率降序、同概率按原始序）。
 
-验收：医生否决一条建议后，同处境的**分诊候选排序**发生可观测变化；
-且**聊天动作池权重不变**（反例对照：改回旧实现 → 断言必须转红）。
+验收（已落地、可证伪，非恒真）：
+- 医生否决一条 `triage:<科室>` 建议后，同处境的**分诊候选排序**发生可观测变化（被否决科室从首位后移）；
+  且 **predict 概率 `< 0.5`**（降权可观测）；采纳一条替代科室则概率 `> 0.5`（升权可观测）。
+- 另一处境的否决**不影响**本处境（处境键隔离）。
+- **聊天动作池权重不变**（反例对照：改回旧实现 → 断言必须转红）；聊天动作池前缀（如 `greet`）被后验**拒绝**（`ok=False` + `"illegal action prefix"`，不写后验）。
+- 验证套件：`tools/e2e_medical_learning.py`（14 项全绿）+ `tools/falsify_medical_learning.py`（2 反例全被抓），已接入 `run_checks.py` ②b / ③b。
 
 ### 阶段 2：病例库骨架
 
@@ -222,7 +230,7 @@ reject 在动作池里 = False
 | 阶段 | 内容 | 与病例库的关系 |
 |---|---|---|
 | **P1** | 身份→实体映射、四角色、科室、医护↔科室、患者档案 | ★ **前置依赖**：谁确认、谁复核、看哪个科室的数据 |
-| **P0.5** | 修反馈作用面（§4 阶段 1） | 让已有的采纳/否决按钮**真正开始训练** |
+| **P0.5** | 修反馈作用面（§4 阶段 1） | ✅ **已完成**（2026-09-22）：医学动作后验落地 `learning.py`，反馈改接 `/api/feedback`，验收见 `e2e_medical_learning.py` + `falsify_medical_learning.py` |
 | **P2** | 会话 + 转人工 + 医护工作台 | 复用同一套科室路由；病例确认入口应落在医护工作台 |
 | **P3** | EMR 适配、审计防篡改、科室统计 | 病例库是科室统计的数据源；病例库本身也需要防篡改 |
 

@@ -136,6 +136,12 @@
 > 读审计是**先记再看**：即使随后返回 404（ref 不存在 / 不属于该患者），这次"试图查看"也已留痕
 > —— IDOR 探测恰恰靠这个发现。
 
+> **受控学习路由（P0.5，管理作用域）**：医生对 AI 分诊/建议的 `adopt`/`reject` 现经
+> `POST /api/feedback`（`decision∈{adopt,reject}` / `medical_action` / `context`）写入自包含的医学动作后验
+> （`pasm_medical/learning.py`，Beta-Bernoulli），**只影响分诊候选排序、不碰安全规则、不训练聊天动作池**；
+> 非法 `decision` 返回 **400**。该路由与上方审计 `feedback-*` 事件**是两件事**：审计负责留痕，后验负责排序信号。
+> 验证见 `tools/e2e_medical_learning.py`（14 项）+ `tools/falsify_medical_learning.py`（2 反例），已接入 `run_checks` ②b / ③b。
+
 ### 3.3 「无依据必须拒答」
 
 语义检索对**任何**问题都会返回结果（只是分数不同）。直接拿弱命中当依据，

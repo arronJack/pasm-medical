@@ -139,10 +139,15 @@ public class AssistController {
     }
 
     /**
-     * 医生对一条 AI 输出的处置（采纳 / 修改 / 否决）。
+     * 医生对一条医学建议的处置（采纳 / 修改 / 否决）。
      *
      * <p><b>这是最高质量的学习信号</b>：病历只记录结果，而"医生否决了这条建议"直接标出
      * 系统的错误。前端每次点击都要落到这里 —— 别只做 UI 状态。
+     *
+     * <p>★ P0.5：信号从聊天动作池改接到<b>医学动作后验</b>（见
+     * {@code PasmCognitionClient#feedbackMedical}）。审计动作名仍保持
+     * {@code feedback-<decision>}（adopt / modify / reject），以兼容后台采纳率统计
+     * （{@code AdminController} 用 {@code countByAction("feedback-adopt")} 等）。
      */
     @PostMapping("/feedback")
     public ResponseEntity<Map<String, Object>> feedback(@RequestBody FeedbackRequest req) {
@@ -150,10 +155,12 @@ public class AssistController {
         if (ref == null) {
             return forbidden(req.patientRef(), "feedback");
         }
-        JsonNode r = cognition.feedback(ref, req.kind(), req.action());
-        String action = "feedback-" + (req.action() == null ? "other" : req.action());
-        auditAct(ref, action, null, "cognition-feedback",
-                "kind=" + req.kind() + ";action=" + req.action());
+        JsonNode r = cognition.feedbackMedical(ref, req.decision(),
+                req.medicalAction(), req.context());
+        String action = "feedback-" + (req.decision() == null ? "other" : req.decision());
+        auditAct(ref, action, null, "cognition-feedback-medical",
+                "decision=" + req.decision() + ";medicalAction=" + req.medicalAction()
+                        + ";context=" + req.context());
         return ResponseEntity.ok(Map.of("result", r));
     }
 
@@ -219,6 +226,7 @@ public class AssistController {
                                       List<String> tags) {
     }
 
-    public record FeedbackRequest(String patientRef, String kind, String action) {
+    public record FeedbackRequest(String patientRef, String decision,
+                                  String medicalAction, String context) {
     }
 }
