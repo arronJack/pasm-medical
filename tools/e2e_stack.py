@@ -485,6 +485,45 @@ def main() -> int:                                # noqa: C901
             check("★ 反例：科室角色删除资料库条目 → 403", st == 403, str(st))
             st, d = req("POST", base + "/api/admin/kb/sync", token=dtoken)
             check("★ 反例：科室角色手动同步资料库 → 403", st == 403, str(st))
+        # ---------- 10d) 第四个角色：科室管理员（deptadmin）端到端覆盖
+        #   ★ 当前 DOCTOR 与 DEPT_ADMIN **有意共享同一档能力**（只差科室绑定），
+        #     真正的差异要等 P1-2（科室实体 + 本科室资源）。所以这里锁的是
+        #     "deptadmin 与 doctor 当前同权"这一不变量：登录→绑定本科室→看本科室患者、
+        #     改配置/写资料库同样 403。deptadmin 此前只在代码与文档里定义、从未被 e2e 覆盖，
+        #     补上它，P1-1 四角色的数据范围才算真正被端到端钉死。
+        st, d = req("POST", base + "/api/auth/login",
+                    {"username": "deptadmin", "password": "123456"})
+        gtoken = d.get("token")
+        check("科室管理员账号可登录且带科室绑定（deptadmin → 发热门诊）",
+              st == 200 and d.get("role") == "DEPT_ADMIN"
+              and d.get("department") == "发热门诊", str(d)[:180])
+        if gtoken:
+            st, d = req("GET", base + "/api/admin/patients", token=gtoken)
+            grefs = [x.get("ref") for x in d] if isinstance(d, list) else []
+            check("★ 科室管理员：与 doctor 同权——看得到本科室患者、看不到骨科那一位",
+                  st == 200 and "demo-patient-001" in grefs
+                  and "demo-patient-002" not in grefs,
+                  "%s %s" % (st, grefs))
+            st, d = req("POST", base + "/api/admin/config",
+                        {"ocr": "builtin", "lis": "none", "llm": "ollama"}, token=gtoken)
+            check("★ 反例：科室管理员改系统配置 → 403（与 doctor 一致，仅超管）",
+                  st == 403, str(st))
+            st, d = req("POST", base + "/api/admin/kb",
+                        {"title": "不应写入", "content": "x", "tags": ["x"]}, token=gtoken)
+            check("★ 反例：科室管理员写资料库 → 403（与 doctor 一致）",
+                  st == 403, str(st))
+            st, d = req("POST", base + "/api/admin/kb/%s/status" % (kb_key or "probe-doc-key"),
+                        {"active": False}, token=gtoken)
+            check("★ 反例：科室管理员停用资料库 → 403（与 doctor 一致）",
+                  st == 403, str(st))
+            # ★ 维持现状锁定：临床侧（含 deptadmin）可跨患者查阅个体档案（scopedRef 放行任意 ref），
+            #   仅聚合视图按科室过滤。这道断言把"个体读不做科室收窄"的决策钉死，
+            #   防止日后误改成 403 而破坏临床查档；也证明 deptadmin ≠ patient（不会 403）。
+            st, d = req("GET", base + "/api/patient?ref=demo-patient-002", token=gtoken)
+            check("★ 科室管理员（临床侧）可跨患者查阅个体档案（维持现状：仅聚合视图按科室过滤）",
+                  st == 200 and d.get("ref") == "demo-patient-002",
+                  str(st) + " " + str(d)[:100])
+
         st, d = req("GET", base + "/api/admin/patients", token=token)
         refs_all = [x.get("ref") for x in d] if isinstance(d, list) else []
         check("★ 超管看全院：两位演示患者都在",
