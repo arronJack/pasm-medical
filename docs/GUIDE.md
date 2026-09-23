@@ -348,7 +348,9 @@ curl -s -H "Authorization: Bearer $PASM_MEDICAL_TOKEN" \
 > curl.exe -s -H "Authorization: Bearer $env:PASM_MEDICAL_TOKEN" http://127.0.0.1:8090/api/cog/capabilities
 > ```
 
-★ **`/healthz` 看 `custom_routes`**：必须 **> 0**（正常 12 条医疗路由）。`healthy` 只是插件级状态，
+★ **`/healthz` 看 `custom_routes`**：必须 **> 0**（正常 **15** 条医疗路由 = 问诊 3 + 检验单 3 +
+记忆/事实 2 + 配置/资料库 3 + 问答 1 + P0.5 后验 3）。**改 `register_medical_routes` 的 routes 表时，
+请同步改这里的数字**（它曾是 12，P0.5 加了 3 条后漂了一版）。`healthy` 只是插件级状态，
 **路由挂没挂它看不出来** —— 医疗接口全 404 时它照样报 `healthy`（2026-09-22 踩过，见 §10 分发形态）。
 
 ### 4.3 启动前端（**已验证可构建**）
