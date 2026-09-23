@@ -26,12 +26,18 @@ import java.util.List;
  * <table>
  *   <caption>授权矩阵</caption>
  *   <tr><th>路径</th><th>要求</th><th>为什么</th></tr>
- *   <tr><td>{@code /actuator/health}、{@code /api/auth/login}</td>
- *       <td>放行</td><td>探活与登录本身不能要令牌</td></tr>
+ *   <tr><td>{@code /actuator/health}、{@code /api/auth/login}、{@code /error}</td>
+ *       <td>放行</td><td>探活与登录本身不能要令牌；{@code /error} 是错误分发的终点，
+ *       拦它会把本该返回的 400 变成误导性的 403（并让"某角色必须 403"的断言因畸形请求而假绿）</td></tr>
  *   <tr><td>{@code /api/admin/config}</td><td>仅超管</td>
  *       <td>它决定「大模型指向何处」，即患者数据会不会出网 —— 这不是科室级权限</td></tr>
- *   <tr><td>{@code /api/admin/kb/**}</td><td>仅超管</td>
- *       <td>资料库是全院答案的依据；当前没有科室维度，给科室写权限 = 一个科室改全院</td></tr>
+ *   <tr><td>{@code /api/admin/kb/sync}</td><td>仅超管</td>
+ *       <td>手动全量同步是运维操作，推"全院生效全集"到认知侧，不属于科室权限</td></tr>
+ *   <tr><td>{@code /api/admin/kb/**}（其余：列表/新建/更新/上架下架/删除）</td>
+ *       <td>超管 + 科室管理员</td>
+ *       <td>P1-2 起资料库带科室维度：科室管理员只能管<b>本科室</b>资料
+ *       （资源级再收窄，见 {@link IdentityContext#canManageDepartment}）；
+ *       医护与患者仍 403，全院通用（空科室）资料也只有超管能动</td></tr>
  *   <tr><td>{@code /api/admin/**}（其余，含读）</td><td>医护侧</td>
  *       <td>能读院内的姓名/过敏史/慢病 → 患者令牌必须 403（最小权限）</td></tr>
  *   <tr><td>其余 {@code /api/**}</td><td>已认证</td>
@@ -65,9 +71,21 @@ public class SecurityConfig {
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/actuator/health", "/api/auth/login").permitAll()
+                // ★ /error 必须放行：请求体畸形（如 JSON 类型不对）时 Spring 会 ERROR 转发到 /error，
+                //   若 /error 仍需认证，客户端拿到的就不是真正的 **400**，而是一个误导性的 **403**
+                //   （实测：tags 传成数组 → HttpMessageNotReadableException，本该 400，却被挡成 403）。
+                //   这还会制造假绿：让"某角色写资料库必须 403"这类断言因**畸形请求**而通过，
+                //   而不是因为鉴权真的挡住了。放行 /error 只暴露错误渲染，不泄漏业务接口。
+                .requestMatchers("/error").permitAll()
                 // ★ 顺序敏感：更具体的规则必须写在前面，否则会被下面的通配吃掉
-                .requestMatchers("/api/admin/config", "/api/admin/kb/**")
-                    .hasRole("SUPER_ADMIN")
+                // 系统配置：仅超管（决定患者数据是否出网，非科室权限）
+                .requestMatchers("/api/admin/config").hasRole("SUPER_ADMIN")
+                // 资料库手动全量同步：仅超管（运维操作，推全院生效全集）
+                .requestMatchers("/api/admin/kb/sync").hasRole("SUPER_ADMIN")
+                // 资料库其余（列表/新建/更新/上架下架/删除）：超管 + 科室管理员；
+                // 科室管理员只能动本科室（资源级判定在 AdminKbController）
+                .requestMatchers("/api/admin/kb/**")
+                    .hasAnyRole("DEPT_ADMIN", "SUPER_ADMIN")
                 // 后台其余（患者列表 / 审计 / 统计）：医护侧可读，范围在接口内按科室收窄
                 .requestMatchers("/api/admin/**")
                     .hasAnyRole("DOCTOR", "DEPT_ADMIN", "SUPER_ADMIN")

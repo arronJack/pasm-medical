@@ -14,6 +14,9 @@ public interface KnowledgeDocRepository extends JpaRepository<KnowledgeDoc, Long
     /** **只有生效资料**才会被同步到认知侧（下架 = 不进检索副本）。 */
     List<KnowledgeDoc> findByStatusOrderByUpdatedAtDesc(String status);
 
+    /** 本科室资料（按更新时间倒序）。P1-2：资料库按科室授权后，科室管理员只看这一批。 */
+    List<KnowledgeDoc> findByDepartmentOrderByUpdatedAtDesc(String department);
+
     Optional<KnowledgeDoc> findByDocKey(String docKey);
 
     long countByStatus(String status);

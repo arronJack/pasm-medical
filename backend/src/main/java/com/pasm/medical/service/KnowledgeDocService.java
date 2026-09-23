@@ -50,6 +50,19 @@ public class KnowledgeDocService {
         return repo.findAllByOrderByUpdatedAtDesc();
     }
 
+    /**
+     * 本科室资料列表（P1-2）。
+     *
+     * <p>★ 科室管理员只看自己科室那一批；传空科室直接返回空列表
+     * （不会退化成"查全院" —— 空值查不到任何行，而不是 {@code department IS NULL}）。
+     */
+    public List<KnowledgeDoc> listByDepartment(String department) {
+        if (department == null || department.isBlank()) {
+            return List.of();
+        }
+        return repo.findByDepartmentOrderByUpdatedAtDesc(department);
+    }
+
     public Optional<KnowledgeDoc> find(String docKey) {
         return repo.findByDocKey(docKey);
     }

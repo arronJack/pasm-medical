@@ -469,14 +469,17 @@ def main() -> int:                                # noqa: C901
                         {"ocr": "builtin", "lis": "none", "llm": "ollama"}, token=dtoken)
             check("★ 反例：医护改系统配置 → 403（仅超管；它决定患者数据会不会出网）",
                   st == 403, str(st))
+            # ★ 请求体必须是**合法**的（tags 是逗号分隔字符串，不是数组）——否则会因
+            #   JSON 反序列化失败返回 400/403，让"角色越权 403"这条断言**假绿**：
+            #   它通过的真正原因是"请求畸形"，而不是"鉴权挡住了"。
             st, d = req("POST", base + "/api/admin/kb",
-                        {"title": "不应写入", "content": "x", "tags": ["x"]}, token=dtoken)
-            check("★ 反例：科室角色写资料库 → 403（资料库是全院依据，属超管）",
+                        {"title": "不应写入", "content": "x", "tags": "x"}, token=dtoken)
+            check("★ 反例：医护写资料库 → 403（临床读资料走问答接口，不写资料库）",
                   st == 403, str(st))
             # ★ 反例：资料库的"写/停用/删除/同步"全部仅超管。现有测试只验了新建，
             #   但停用/删除/同步同样能影响全院回答依据，必须同样挡在 403。
-            #   （SecurityConfig 把整个 /api/admin/kb/** 限 ROLE_STAFF，鉴权在控制器之前，
-            #    所以即便 key 不存在也先 403，不会退化成 404。）
+            #   （P1-2 起 SecurityConfig 把 /api/admin/kb/** 限 DEPT_ADMIN + SUPER_ADMIN，
+            #    鉴权在控制器之前，所以医护即便 key 不存在也先 403，不会退化成 404。）
             kb_probe = kb_key or "probe-doc-key"
             st, d = req("POST", base + "/api/admin/kb/%s/status" % kb_probe,
                         {"active": False}, token=dtoken)
@@ -485,12 +488,15 @@ def main() -> int:                                # noqa: C901
             check("★ 反例：科室角色删除资料库条目 → 403", st == 403, str(st))
             st, d = req("POST", base + "/api/admin/kb/sync", token=dtoken)
             check("★ 反例：科室角色手动同步资料库 → 403", st == 403, str(st))
-        # ---------- 10d) 第四个角色：科室管理员（deptadmin）端到端覆盖
-        #   ★ 当前 DOCTOR 与 DEPT_ADMIN **有意共享同一档能力**（只差科室绑定），
-        #     真正的差异要等 P1-2（科室实体 + 本科室资源）。所以这里锁的是
-        #     "deptadmin 与 doctor 当前同权"这一不变量：登录→绑定本科室→看本科室患者、
-        #     改配置/写资料库同样 403。deptadmin 此前只在代码与文档里定义、从未被 e2e 覆盖，
-        #     补上它，P1-1 四角色的数据范围才算真正被端到端钉死。
+        # ---------- 10d) 第四个角色：科室管理员（deptadmin）—— P1-2 真实能力差异
+        #   ★ P1-2 起，科室管理员与医护**不再同权**：科室管理员是第一个真正能写资料库
+        #     的角色，但只能管**本科室（发热门诊）**资料。下面把这条差异端到端钉死：
+        #     ① 新建被强制归到本科室（请求里带别的科室也落不到别科）；
+        #     ② 列表只含本科室（全院通用/别科不出现在视图）；
+        #     ③ 上架/下架/删除本科室资料 → 200；
+        #     ④ 动"全院通用（空科室）"或"别科"资料 → 403。
+        #   deptadmin 此前只在代码与文档里定义、从未被 e2e 覆盖，补上它，
+        #   P1-2 四角色的数据范围才算真正被端到端钉死。
         st, d = req("POST", base + "/api/auth/login",
                     {"username": "deptadmin", "password": "123456"})
         gtoken = d.get("token")
@@ -498,24 +504,67 @@ def main() -> int:                                # noqa: C901
               st == 200 and d.get("role") == "DEPT_ADMIN"
               and d.get("department") == "发热门诊", str(d)[:180])
         if gtoken:
+            # ★ 在"患者范围"上仍与 doctor 同权（看本科室、看不到骨科）
             st, d = req("GET", base + "/api/admin/patients", token=gtoken)
             grefs = [x.get("ref") for x in d] if isinstance(d, list) else []
-            check("★ 科室管理员：与 doctor 同权——看得到本科室患者、看不到骨科那一位",
+            check("★ 科室管理员：与 doctor 在患者范围上同权——看得到本科室、看不到骨科",
                   st == 200 and "demo-patient-001" in grefs
                   and "demo-patient-002" not in grefs,
                   "%s %s" % (st, grefs))
+            # ★ 改系统配置仍 403（仅超管，决定患者数据是否出网）
             st, d = req("POST", base + "/api/admin/config",
                         {"ocr": "builtin", "lis": "none", "llm": "ollama"}, token=gtoken)
-            check("★ 反例：科室管理员改系统配置 → 403（与 doctor 一致，仅超管）",
-                  st == 403, str(st))
+            check("★ 反例：科室管理员改系统配置 → 403（仅超管）", st == 403, str(st))
+            # ★ P1-2：科室管理员可新建本科室资料，且科室被**强制**为本科室
             st, d = req("POST", base + "/api/admin/kb",
-                        {"title": "不应写入", "content": "x", "tags": ["x"]}, token=gtoken)
-            check("★ 反例：科室管理员写资料库 → 403（与 doctor 一致）",
-                  st == 403, str(st))
-            st, d = req("POST", base + "/api/admin/kb/%s/status" % (kb_key or "probe-doc-key"),
+                        {"title": "发热门诊本科室手册", "content": "x",
+                         "tags": "发热门诊", "department": "骨科"}, token=gtoken)
+            gdoc = (d.get("doc") or {}) if st == 200 else {}
+            gkey = str(gdoc.get("docKey") or "")
+            check("★ 科室管理员新建资料 → 200，且 department 被强制为本科室（发热门诊）",
+                  st == 200 and bool(gkey) and gdoc.get("department") == "发热门诊",
+                  "st=%s dept=%s %s" % (st, gdoc.get("department"), str(d)[:150]))
+            # ★ 列表只含本科室：每条返回资料的 department 都应是发热门诊
+            st, d = req("GET", base + "/api/admin/kb", token=gtoken)
+            gdocs = (d.get("docs") or []) if st == 200 else []
+            only_own = bool(gdocs) and all(
+                x.get("department") == "发热门诊" for x in gdocs)
+            check("★ 科室管理员列表只含本科室资料（全院通用/别科不出现在视图）",
+                  st == 200 and only_own
+                  and any(x.get("docKey") == gkey for x in gdocs),
+                  "st=%s n=%d %s" % (st, len(gdocs), str(gdocs)[:200]))
+            # ★ 上架 / 下架 / 删除本科室资料 → 200
+            st, d = req("POST", base + "/api/admin/kb/%s/status" % gkey,
                         {"active": False}, token=gtoken)
-            check("★ 反例：科室管理员停用资料库 → 403（与 doctor 一致）",
-                  st == 403, str(st))
+            check("★ 科室管理员下架本科室资料 → 200（status=inactive）",
+                  st == 200 and (d.get("doc") or {}).get("status") == "inactive",
+                  "st=%s %s" % (st, str(d)[:150]))
+            st, d = req("POST", base + "/api/admin/kb/%s/status" % gkey,
+                        {"active": True}, token=gtoken)
+            check("★ 科室管理员重新上架本科室资料 → 200（status=active）",
+                  st == 200 and (d.get("doc") or {}).get("status") == "active",
+                  "st=%s %s" % (st, str(d)[:150]))
+            st, d = req("DELETE", base + "/api/admin/kb/%s" % gkey, token=gtoken)
+            check("★ 科室管理员删除本科室资料 → 200", st == 200, str(st))
+            # ★ 反例：动"全院通用"资料（超管建的 kb_key，department 为空）→ 403
+            hw_key = kb_key or "probe-doc-key"
+            st, d = req("POST", base + "/api/admin/kb/%s/status" % hw_key,
+                        {"active": False}, token=gtoken)
+            check("★ 反例：科室管理员动全院通用（空科室）资料 → 403", st == 403, str(st))
+            st, d = req("DELETE", base + "/api/admin/kb/%s" % hw_key, token=gtoken)
+            check("★ 反例：科室管理员删除全院通用（空科室）资料 → 403", st == 403, str(st))
+            # ★ 反例：动"别科"资料（超管建的 骨科 资料）→ 403
+            st, d = req("POST", base + "/api/admin/kb",
+                        {"title": "骨科别科资料", "content": "x",
+                         "tags": "骨科", "department": "骨科"}, token=token)
+            other_key = str((d.get("doc") or {}).get("docKey") or "")
+            st, d = req("POST", base + "/api/admin/kb/%s/status" % other_key,
+                        {"active": False}, token=gtoken)
+            check("★ 反例：科室管理员动别科（骨科）资料 → 403", st == 403, str(st))
+            st, d = req("DELETE", base + "/api/admin/kb/%s" % other_key, token=gtoken)
+            check("★ 反例：科室管理员删除别科（骨科）资料 → 403", st == 403, str(st))
+            # 清理：超管删掉这条别科资料，避免污染后续断言
+            req("DELETE", base + "/api/admin/kb/%s" % other_key, token=token)
             # ★ 维持现状锁定：临床侧（含 deptadmin）可跨患者查阅个体档案（scopedRef 放行任意 ref），
             #   仅聚合视图按科室过滤。这道断言把"个体读不做科室收窄"的决策钉死，
             #   防止日后误改成 403 而破坏临床查档；也证明 deptadmin ≠ patient（不会 403）。

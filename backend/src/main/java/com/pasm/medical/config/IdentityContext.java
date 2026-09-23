@@ -82,4 +82,15 @@ public final class IdentityContext {
     public static boolean clinicalSide() {
         return current().clinicalSide();
     }
+
+    /**
+     * 当前身份能否管理某科室的资料（资源级授权，见 {@link Identity#canManageDepartment}）。
+     *
+     * <p>★ 这是 URL 级授权之后的第二道闸门：URL 只能回答"科室管理员能不能调这个接口"，
+     * 而"这条资料是不是他本科室的"必须在资源里按身份收窄 —— 否则一个科室管理员
+     * 就能通过改 docKey 动到别的科室甚至全院通用的资料。
+     */
+    public static boolean canManageDepartment(String dept) {
+        return current().canManageDepartment(dept);
+    }
 }

@@ -1,5 +1,7 @@
 package com.pasm.medical.web;
 
+import com.pasm.medical.config.Identity;
+import com.pasm.medical.config.IdentityContext;
 import com.pasm.medical.domain.AiAudit;
 import com.pasm.medical.domain.KnowledgeDoc;
 import com.pasm.medical.service.AuditService;
@@ -22,9 +24,16 @@ import java.util.Map;
 /**
  * 资料库管理（`/api/admin/kb`）。
  *
- * <p>★ 授权：整个 {@code /api/admin/**} 在 SecurityConfig 里限 {@code ROLE_STAFF}，
- * 本控制器自然继承 —— 资料是**回答依据**，能改资料就能影响系统对所有患者的回答，
- * 这比改一条病历影响面更大。
+ * <p>★ 授权（两层）：
+ * <ol>
+ *   <li>URL 级（SecurityConfig）：{@code /api/admin/kb/sync} 仅超管；
+ *       其余 {@code /api/admin/kb/**} 限 {@code DEPT_ADMIN} + {@code SUPER_ADMIN}
+ *       （P1-2 起资料库带科室维度）；医护与患者仍 403。</li>
+ *   <li>资源级（本控制器）：科室管理员只能动**本科室**资料 —— 新建强制本科室、
+ *       更新/上下架/删除跨科室或全院通用（空）资料一律 403（见
+ *       {@link IdentityContext#canManageDepartment}）。资料是**回答依据**，
+ *       能改资料就能影响系统对所有患者的回答，这比改一条病历影响面更大。</li>
+ * </ol>
  *
  * <p>★ 每次写操作都会：① 落业务库；② 全量同步到认知侧检索副本；③ 留审计。
  * 同步结果随响应返回（{@code sync.synced}）——**修了库但检索侧没生效**这种漂移
@@ -42,17 +51,31 @@ public class AdminKbController {
         this.audit = audit;
     }
 
-    /** 列表 + 生效/下架计数。 */
+    /** 列表 + 生效/下架计数。科室管理员只看本科室那一批（P1-2）。 */
     @GetMapping("")
     public ResponseEntity<Map<String, Object>> list() {
+        Identity id = IdentityContext.current();
+        List<KnowledgeDoc> all;
+        if (id.authenticated() && id.isDeptAdmin()) {
+            // ★ 本科室资源：科室管理员只看到自己科室的资料，全院通用（空）资料不出现在他的视图里
+            all = kb.listByDepartment(id.department());
+        } else {
+            all = kb.list();
+        }
         List<Map<String, Object>> docs = new ArrayList<>();
-        for (KnowledgeDoc d : kb.list()) {
+        long active = 0, inactive = 0;
+        for (KnowledgeDoc d : all) {
             docs.add(view(d));
+            if (KnowledgeDocService.ACTIVE.equals(d.getStatus())) {
+                active++;
+            } else {
+                inactive++;
+            }
         }
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("docs", docs);
-        m.put("active", kb.countActive());
-        m.put("inactive", kb.countInactive());
+        m.put("active", active);
+        m.put("inactive", inactive);
         m.put("note", "标签是相关性闸门的命中面：问题词元必须落在标题或标签上，"
                 + "这条资料才会被当作回答依据。正文不参与该判定。");
         return ResponseEntity.ok(m);
@@ -64,10 +87,26 @@ public class AdminKbController {
         if (req == null || req.title() == null || req.title().isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "title 不能为空"));
         }
+        Identity id = IdentityContext.current();
+        String effectiveDept;
+        if (id.authenticated() && id.isDeptAdmin()) {
+            // ★ 科室管理员：① 更新既有资料前先确认它属本科室；② 新建一律强制本科室，
+            //   忽略请求里携带的 department（防止借新建越权写入别科/全院通用资料）
+            if (req.docKey() != null && !req.docKey().isBlank()) {
+                KnowledgeDoc existing = kb.find(req.docKey()).orElse(null);
+                if (existing != null && !id.department().equals(existing.getDepartment())) {
+                    return ResponseEntity.status(403)
+                            .body(Map.of("error", "只能管理本科室资料"));
+                }
+            }
+            effectiveDept = id.department();
+        } else {
+            effectiveDept = req.department();   // 超管沿用请求（空 = 全院通用）
+        }
         String actor = AuditService.currentActor(null);
         boolean creating = req.docKey() == null || req.docKey().isBlank();
         KnowledgeDoc d = kb.upsert(req.docKey(), req.title(), req.content(), req.tags(),
-                req.department(), req.version(), req.reviewer(), actor);
+                effectiveDept, req.version(), req.reviewer(), actor);
         auditSafe(actor, creating ? "kb-create" : "kb-update",
                 "key=" + d.getDocKey() + ";title=" + d.getTitle() + ";tags=" + d.getTags());
         Map<String, Object> m = new LinkedHashMap<>();
@@ -81,10 +120,15 @@ public class AdminKbController {
     public ResponseEntity<Map<String, Object>> status(@PathVariable String docKey,
                                                       @RequestBody StatusRequest req) {
         String actor = AuditService.currentActor(null);
-        KnowledgeDoc d = kb.setStatus(docKey, req != null && req.active(), actor);
-        if (d == null) {
+        KnowledgeDoc existing = kb.find(docKey).orElse(null);
+        if (existing == null) {
             return ResponseEntity.notFound().build();
         }
+        // ★ 资源级第二道闸门：这条资料必须属当前身份可管理的科室（P1-2）
+        if (!IdentityContext.canManageDepartment(existing.getDepartment())) {
+            return ResponseEntity.status(403).body(Map.of("error", "只能管理本科室资料"));
+        }
+        KnowledgeDoc d = kb.setStatus(docKey, req != null && req.active(), actor);
         auditSafe(actor, req != null && req.active() ? "kb-activate" : "kb-deactivate",
                 "key=" + docKey);
         Map<String, Object> m = new LinkedHashMap<>();
@@ -97,6 +141,14 @@ public class AdminKbController {
     @DeleteMapping("/{docKey}")
     public ResponseEntity<Map<String, Object>> delete(@PathVariable String docKey) {
         String actor = AuditService.currentActor(null);
+        KnowledgeDoc existing = kb.find(docKey).orElse(null);
+        if (existing == null) {
+            return ResponseEntity.notFound().build();
+        }
+        // ★ 资源级第二道闸门：这条资料必须属当前身份可管理的科室（P1-2）
+        if (!IdentityContext.canManageDepartment(existing.getDepartment())) {
+            return ResponseEntity.status(403).body(Map.of("error", "只能管理本科室资料"));
+        }
         if (!kb.delete(docKey)) {
             return ResponseEntity.notFound().build();
         }

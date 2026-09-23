@@ -52,6 +52,39 @@ public record Identity(String username,
         return role != null && role.clinicalSide();
     }
 
+    /** 是否科室管理员。 */
+    public boolean isDeptAdmin() {
+        return role == Role.DEPT_ADMIN;
+    }
+
+    /**
+     * 当前身份能否管理某科室的资料（P1-2：资料库按科室授权）。
+     *
+     * <ul>
+     *   <li><b>超级管理员</b>（全院范围）：可管理任意科室，也包括"全院通用"（空）资料；</li>
+     *   <li><b>科室管理员</b>：只能管理<b>本科室</b>资料；**不能**管理全院通用（空）
+     *       或其它科室的资料 —— 否则等于让一个科室改掉全院所有科室的答案依据；</li>
+     *   <li>其余角色（患者 / 医护）：资料库与其无关，返回 false。</li>
+     * </ul>
+     *
+     * @param dept 资料归属科室；空或 null 表示"全院通用"
+     */
+    public boolean canManageDepartment(String dept) {
+        if (role == null) {
+            return false;
+        }
+        if (role.hospitalWide()) {
+            return true;
+        }
+        if (role == Role.DEPT_ADMIN) {
+            if (dept == null || dept.isBlank()) {
+                return false;                  // 科室管理员不能动全院通用资料
+            }
+            return dept.equals(this.department);
+        }
+        return false;                          // 患者 / 医护：资料库与其无关
+    }
+
     /**
      * 本项目前该身份能看的数据范围（给界面显示用）。
      *
