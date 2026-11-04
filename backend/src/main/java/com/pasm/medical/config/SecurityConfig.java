@@ -89,6 +89,11 @@ public class SecurityConfig {
                 // 后台其余（患者列表 / 审计 / 统计）：医护侧可读，范围在接口内按科室收窄
                 .requestMatchers("/api/admin/**")
                     .hasAnyRole("DOCTOR", "DEPT_ADMIN", "SUPER_ADMIN")
+                // ★ 机器对接通道（LIS / FHIR 投递）：没有用户 JWT，走专用共享密钥。
+                //   这里 permitAll 不等于不设防 —— 控制器里用 IntegrationTokenGuard 校验，
+                //   且未配置密钥时**关闭通道**（503），不是放行。
+                //   为什么不放一个 USER 角色令牌：那等于给了 LIS 读全院病历的权限。
+                .requestMatchers("/api/integration/**").permitAll()
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().authenticated())
             // ★ 401 与 403 必须分开：

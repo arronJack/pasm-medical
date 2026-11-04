@@ -7,9 +7,12 @@
 ## ⚠️ 阅读须知：本文是「设计目标 + 路线图」，不是当前已实现状态
 
 - 当前已落地的是 **MVP**（验证过、能跑），真实能力见 [README「现状与后续」](README.md#现状与后续)。
-- 设计稿中的 **pgvector / MinIO / Redis / FHIR / SSE 流式 / 自学习闭环 / LIS-HL7 适配器** 在 MVP 中**尚未落地** —— 属于目标，不是现状。
-  PostgreSQL **已落地**：生产表结构由 Flyway 版本化迁移管理（`db/migration/V1__init.sql`），
+- 设计稿中的 **pgvector / MinIO / Redis / SSE 流式 / 自学习闭环** 在 MVP 中**尚未落地** —— 属于目标，不是现状。
+  PostgreSQL **已落地**：生产表结构由 Flyway 版本化迁移管理（`db/migration/V1__init.sql`、`V2__lab_results.sql`），
   dev(H2) 与生产共用同一份脚本；见 [DB-MIGRATION.md](DB-MIGRATION.md)。
+  **LIS/HL7/FHIR 对接已落地**（HL7 ORU / FHIR Observation 投递 + FHIR 只读投影，
+  见 [INTEGRATION-LIS-FHIR.md](INTEGRATION-LIS-FHIR.md)）；但 **MLLP TCP 监听、HL7 ACK 报文、
+  LOINC/SNOMED 映射** 仍未实现 —— 边界以该文档第 7 节为准。
   认知服务的**跨请求会话**已抽出可插拔 `SessionStore`（默认 memory / CLI 默认 file），
   单机多 worker 与重启不再丢会话；**多主机**水平扩容仍需接 Redis/DB 实现（协议已就位）。
 - 下文凡标注「（目标）」的，均为 MVP 暂未落地的设计。
@@ -19,7 +22,7 @@
 | 语言 / JDK | Java 21 | Java 17（JPA，非 MyBatis-Plus） |
 | 数据库 | PostgreSQL + pgvector | **PostgreSQL + Flyway 迁移已落地**（`db/migration/V1__init.sql`，dev 的 H2 共用同一份）；pgvector 未用 |
 | 缓存 / 对象存储 | Redis + MinIO | 无（会话状态走 `SessionStore`：memory / file；认知记忆按 agent 落盘） |
-| 数据标准 | FHIR | 自造 JPA schema；仅 `Encounter` 保留最小 FHIR 投影 |
+| 数据标准 | FHIR | **FHIR R4 只读投影已落地**（Patient/Encounter/Observation）；写入只支持 Observation，无 LOINC 映射 |
 | 认知服务 | 无状态、可水平扩容 | 跨请求会话已抽出 `SessionStore`（file 存储：单机多 worker / 重启不丢）；多主机需接 Redis/DB |
 | 前端流式 | SSE | 非流式（一次性响应） |
 | 自学习闭环 | 每日批处理 + 候选池 + 审核台 | 仅分诊候选排序后验（P0.5） |
@@ -49,8 +52,15 @@
 - **「期望 vs 生效」对账**：后台「对接设置」存的是机构期望值，认知服务用
   `GET /api/config` 报出进程真实配置，不一致时界面显式提示漂移 ——
   避免"配置了但其实没生效"。
-- **三端联调 `tools/e2e_stack.py` 全过**（67 项，含 20 项越权/非法输入反例；
-  P1-1/P1-2 共 12 项判据已做反向验证：故意改坏 → 恰好对应条数转红 → 还原后 67/67）。
+- **LIS/HL7/FHIR 对接（2026-11-04）**：`lis` 配置不再是空壳 —— `off/hl7/fhir` 真正控制
+  哪条通道可用。HL7 v2 `ORU^R01` 解析（MLLP 帧 / 自定义分隔符 / 转义 / 时区沿用 MSH-7）
+  → 项目级落 `lab_results`（V2 迁移，`(message_control_id, observation_seq)` 幂等）；
+  FHIR `Observation`/`Bundle` 投递同表同幂等；`/api/fhir/**` 提供 R4 只读投影。
+  机器通道用**独立共享密钥**（`MEDICAL_LIS_TOKEN`，未配置即关闭），与用户 JWT 分离。
+  验证：HL7 解析单测 10 项 + 真 PostgreSQL 集成 9 项（含无令牌 401、坏消息 400 不落库、
+  未知患者 422、重发幂等、跨患者同 id 冲突）。
+- **三端联调 `tools/e2e_stack.py` 全过**（74 项，含越权/非法输入反例；
+  P1-1/P1-2 共 12 项判据已做反向验证：故意改坏 → 恰好对应条数转红 → 还原后 74/74）。
 - **P1-2 科室实体 + 本科室资源**：资料库引入**科室维度**（`KnowledgeDoc.department`，
   空 = 全院通用），科室管理员只**能管本科室**资料（新建强制本科室、跨科室/全院通用→403、
   列表仅本科室），与医护拉开首个真实能力差异。顺带修掉一个误导性缺陷：请求体畸形时

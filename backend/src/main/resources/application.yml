@@ -63,6 +63,14 @@ medical:
     jwt-ttl-seconds: ${MEDICAL_AUTH_JWT_TTL:3600}
     jwt-issuer: ${MEDICAL_AUTH_JWT_ISSUER:pasm-medical}
 
+  # ── LIS / FHIR 对接（机器通道）──────────────────────────────────────
+  # ★ 与用户令牌**完全分离**：LIS 只该有"投递检验结果"的权限，
+  #   给它一个医护 JWT 等于让它能读全院病历。
+  # ★ 未配置（空）= 通道关闭（fail closed），不是"不校验"。
+  # 生成：openssl rand -base64 48
+  lis:
+    token: ${MEDICAL_LIS_TOKEN:}
+
   # 每次认知调用都要留痕：入参快照 / 召回条目 / 模型版本 / 操作者 / 时间。
   # 生产建议落到**独立库**且只授予 INSERT（append-only），与业务库物理隔离。
   audit:

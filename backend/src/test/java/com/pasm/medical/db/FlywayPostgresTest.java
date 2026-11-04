@@ -41,7 +41,8 @@ class FlywayPostgresTest {
                     .locations("classpath:db/migration")
                     .load()
                     .migrate();
-            assertEquals(1, first.migrationsExecuted, "V1 应执行一次");
+            assertTrue(first.migrationsExecuted >= 1,
+                    "首次迁移应至少执行 V1（当前应为 V1+V2，但不必随版本数改断言）");
 
             try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
                 assertEquals(5, count(st,
@@ -64,6 +65,12 @@ class FlywayPostgresTest {
                         "SELECT count(*) FROM flyway_schema_history "
                                 + "WHERE version='1' AND success=true"),
                         "flyway_schema_history 应记录 V1 success");
+
+                // V2（LIS 检验结果）也要落账：只验 V1 会让"新迁移没跑"悄悄溜过去
+                assertEquals(1, count(st,
+                        "SELECT count(*) FROM flyway_schema_history "
+                                + "WHERE version='2' AND success=true"),
+                        "flyway_schema_history 应记录 V2 success");
 
                 st.execute("INSERT INTO patients(ref, created_at) "
                         + "VALUES ('flyway-test-p1', now())");
