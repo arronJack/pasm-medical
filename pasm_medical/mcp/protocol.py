@@ -19,7 +19,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 
 SERVER_NAME = "pasm-medical-mcp"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.1.1"
 
 #: 服务端能力声明。只声明 tools —— 不声明就是不支持，别虚报。
 CAPABILITIES = {"tools": {}}
