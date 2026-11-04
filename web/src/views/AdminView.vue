@@ -155,10 +155,86 @@
           </button>
           <span v-else class="hint">已经是全部了</span>
         </div>
+          <p class="hint">
+            每条 AI 输出都必须可追溯到「输入快照 + 召回条目 + 模型版本 + 操作者」。
+            生产环境审计库应**独立且只授予 INSERT**，与业务库物理隔离。
+          </p>
+        </template>
+
+      <!-- 审核台 -->
+      <template v-else-if="tab === 'review'">
+        <h2>自学习审核台</h2>
         <p class="hint">
-          每条 AI 输出都必须可追溯到「输入快照 + 召回条目 + 模型版本 + 操作者」。
-          生产环境审计库应**独立且只授予 INSERT**，与业务库物理隔离。
+          候选来自每日批处理（从近期就诊抽取可沉淀的经验），<strong>默认不直接生效</strong>。
+          只有经本台「采纳」后，才会写进资料库并同步认知侧。这是自学习闭环的 human-in-the-loop 闸门
+          —— 医生写错的病历若直接学进去，系统会把错误<strong>放大</strong>。
         </p>
+
+        <div class="revbar">
+          <div class="seg">
+            <button :class="{ on: candidateFilter === 'pending' }" @click="setFilter('pending')">待处理</button>
+            <button :class="{ on: candidateFilter === 'conflict' }" @click="setFilter('conflict')">冲突挂起</button>
+            <button :class="{ on: candidateFilter === 'approved' }" @click="setFilter('approved')">已采纳</button>
+            <button :class="{ on: candidateFilter === 'rejected' }" @click="setFilter('rejected')">已驳回</button>
+          </div>
+          <button class="ghost" :disabled="candBusy" @click="loadCandidates()">刷新</button>
+        </div>
+
+        <p v-if="candMsg" class="hint" :class="candBad ? 'warn' : ''">{{ candMsg }}</p>
+
+        <table>
+          <thead>
+            <tr><th>标题 / 内容</th><th>科室</th><th>标签</th><th>评分</th><th>状态</th><th>依据</th><th>创建</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="c in candidates" :key="c.id">
+              <td>
+                <div class="ctitle">{{ c.title }}</div>
+                <div class="cbody">{{ c.content }}</div>
+                <div v-if="c.status === 'CONFLICT'" class="cwarn">
+                  ⚠ 与现库 {{ c.conflictWith }} 同标题但结论相反，已挂起待人工裁定（采纳即覆盖）
+                </div>
+              </td>
+              <td>{{ c.department || '全院' }}</td>
+              <td class="snap" :title="c.tags.join(' / ')">{{ c.tags.join(' / ') || '—' }}</td>
+              <td>{{ Math.round((c.confidence || 0) * 100) }}%</td>
+              <td><span class="badge" :class="cstatus(c.status)">{{ cstatusText(c.status) }}</span></td>
+              <td class="snap" :title="c.evidence">{{ c.evidence }}</td>
+              <td class="mono">{{ c.createdAt }}</td>
+              <td class="ops">
+                <template v-if="c.status === 'PENDING' || c.status === 'CONFLICT'">
+                  <button :disabled="!canWriteKb || candBusy" @click="approveCandidate(c.id)">采纳</button>
+                  <button :disabled="!canWriteKb || candBusy" @click="rejectCandidate(c.id)">驳回</button>
+                </template>
+                <span v-else class="muted">{{ c.reviewedBy || '—' }}</span>
+              </td>
+            </tr>
+            <tr v-if="!candidates.length">
+              <td colspan="8" class="empty">
+                暂无候选。可点下方「生成候选」从近期就诊抽取经验，或等待每日 02:00 批处理。
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="pool">
+          <div class="pool-h">知识池版本（可回滚）</div>
+          <template v-if="poolVersion">
+            <div class="pool-line">
+              当前版本 <b>v{{ poolVersion.version }}</b> · 本版本资料 {{ poolVersion.docsAtVersion }} 条
+            </div>
+            <div class="pool-actions">
+              <button class="primary" :disabled="candBusy || !isSuperAdmin" @click="generateCandidates()">
+                生成候选（扫近期就诊）
+              </button>
+              <button :disabled="candBusy || !poolVersion.rollbackAvailable || !isSuperAdmin" @click="rollbackPool()">
+                回滚上一版本
+              </button>
+              <span v-if="!poolVersion.rollbackAvailable" class="hint">已是最初版本，无可回退</span>
+              <span v-if="!isSuperAdmin" class="hint warn">生成与回滚仅超管可用</span>
+            </div>
+          </template>
+        </div>
       </template>
 
       <!-- 对接设置 -->
@@ -243,12 +319,13 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { api, type AdminConfigView, type DesiredConfig, type IdentityView, type KbDoc } from '../api'
+import { api, type AdminConfigView, type DesiredConfig, type IdentityView, type KbDoc, type KbCandidate, type KbPoolVersion } from '../api'
 import { ensureIdentity } from '../identity'
 
 const tabs = [
   { id: 'patients', name: '患者情况' },
   { id: 'kb', name: '资料库' },
+  { id: 'review', name: '审核台' },
   { id: 'stats', name: '统计' },
   { id: 'audit', name: '审计' },
   { id: 'config', name: '对接设置' },
@@ -303,6 +380,15 @@ const kbMsg = ref('')
 const kbBad = ref(false)
 const emptyKbForm = () => ({ docKey: '', title: '', tags: '', content: '', version: '', reviewer: '' })
 const kbForm = ref(emptyKbForm())
+
+// ── 审核台：自学习候选池（PLAN §8）──
+const candidates = ref<KbCandidate[]>([])
+const candidateFilter = ref<'pending' | 'conflict' | 'approved' | 'rejected' | 'all'>('pending')
+const poolVersion = ref<KbPoolVersion | null>(null)
+const candBusy = ref(false)
+const candMsg = ref('')
+const candBad = ref(false)
+const isSuperAdmin = computed(() => me.value?.role === 'SUPER_ADMIN')
 
 async function loadKb() {
   try {
@@ -396,6 +482,113 @@ async function syncKb() {
   } finally {
     kbBusy.value = false
   }
+}
+
+// ── 审核台：自学习候选池
+async function loadCandidates() {
+  try {
+    const status = candidateFilter.value === 'pending' ? undefined
+      : candidateFilter.value === 'conflict' ? 'CONFLICT'
+      : candidateFilter.value === 'approved' ? 'APPROVED'
+      : candidateFilter.value === 'rejected' ? 'REJECTED' : undefined
+    // "待处理" = 不含已驳回（待审 + 冲突 + 已采纳）
+    candidates.value = await api.adminCandidates(status)
+  } catch (e) {
+    candMsg.value = e instanceof Error ? e.message : String(e)
+    candBad.value = true
+  }
+}
+
+function setFilter(f: 'pending' | 'conflict' | 'approved' | 'rejected') {
+  candidateFilter.value = f
+  loadCandidates()
+}
+
+async function loadPoolVersion() {
+  try {
+    poolVersion.value = await api.adminKbPoolVersion()
+  } catch {
+    // 不影响主流程
+  }
+}
+
+async function generateCandidates() {
+  candBusy.value = true
+  candMsg.value = ''
+  try {
+    const r = await api.adminGenerateCandidates(30)
+    candBad.value = false
+    candMsg.value = `已生成候选 ${r.generated} 条（去重 ${r.deduplicated}，冲突挂起 ${r.conflict}，待审共 ${r.pendingTotal}）`
+    await loadCandidates()
+    await loadPoolVersion()
+  } catch (e) {
+    candBad.value = true
+    candMsg.value = '生成失败：' + (e instanceof Error ? e.message : String(e))
+  } finally {
+    candBusy.value = false
+  }
+}
+
+async function approveCandidate(id: number) {
+  candBusy.value = true
+  candMsg.value = ''
+  try {
+    const r = await api.adminApproveCandidate(id)
+    candBad.value = false
+    candMsg.value = (r.sync && r.sync.synced === false)
+      ? '已采纳并入库；但同步检索副本失败：' + (r.sync.error || '认知服务不可达')
+      : '已采纳：' + r.docKey + '（知识池版本 v' + r.poolVersion + '）'
+    await loadCandidates()
+    await loadPoolVersion()
+    await loadKb()
+  } catch (e) {
+    candBad.value = true
+    candMsg.value = '采纳失败：' + (e instanceof Error ? e.message : String(e))
+  } finally {
+    candBusy.value = false
+  }
+}
+
+async function rejectCandidate(id: number) {
+  candBusy.value = true
+  candMsg.value = ''
+  try {
+    await api.adminRejectCandidate(id)
+    candBad.value = false
+    candMsg.value = '已驳回（未入库）'
+    await loadCandidates()
+  } catch (e) {
+    candBad.value = true
+    candMsg.value = '驳回失败：' + (e instanceof Error ? e.message : String(e))
+  } finally {
+    candBusy.value = false
+  }
+}
+
+async function rollbackPool() {
+  candBusy.value = true
+  candMsg.value = ''
+  try {
+    const r = await api.adminKbPoolRollback()
+    candBad.value = false
+    candMsg.value = `已回滚：v${r.from} → v${r.to}，停用 ${r.deactivated} 条资料`
+    await loadPoolVersion()
+    await loadKb()
+  } catch (e) {
+    candBad.value = true
+    candMsg.value = '回滚失败：' + (e instanceof Error ? e.message : String(e))
+  } finally {
+    candBusy.value = false
+  }
+}
+
+function cstatus(s: string) {
+  return s === 'APPROVED' ? 'ok' : s === 'REJECTED' ? 'warn'
+    : s === 'CONFLICT' ? 'emergency' : 'pending'
+}
+function cstatusText(s: string) {
+  return s === 'PENDING' ? '待审' : s === 'APPROVED' ? '已采纳'
+    : s === 'REJECTED' ? '已驳回' : '冲突挂起'
 }
 
 // ── 对接设置：真实读写业务层（不再是前端占位）
@@ -526,7 +719,7 @@ async function load() {
   } finally {
     loading.value = false
   }
-  await Promise.all([loadConfig(), loadKb()])
+  await Promise.all([loadConfig(), loadKb(), loadCandidates(), loadPoolVersion()])
 }
 
 onMounted(load)
@@ -627,4 +820,36 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
   background: #fff; font-size: 12px; cursor: pointer;
 }
 .audit-more button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 审核台 */
+.revbar { display: flex; align-items: center; gap: 14px; margin: 4px 0 10px; }
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
+.seg button {
+  padding: 6px 14px; font-size: 13px; border: 0; background: #fff; cursor: pointer; color: var(--text-2);
+  border-right: 1px solid var(--line-strong);
+}
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--primary); color: #fff; }
+.ghost {
+  padding: 6px 12px; font-size: 13px; border: 1px solid var(--line-strong);
+  border-radius: 8px; background: #fff; cursor: pointer;
+}
+.ctitle { font-size: 13px; font-weight: 500; }
+.cbody {
+  margin-top: 3px; font-size: 12px; color: var(--text-2); max-width: 360px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cwarn { margin-top: 4px; font-size: 11px; color: var(--danger-fg); }
+.badge.pending { background: #eef2ff; color: #3b5bdb; }
+.muted { font-size: 12px; color: var(--text-3); }
+.pool {
+  margin-top: 18px; padding: 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); font-size: 13px;
+}
+.pool-h { font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
+.pool-line { margin-bottom: 10px; }
+.pool-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pool-actions button { padding: 7px 14px; font-size: 13px; border-radius: 7px; border: 1px solid var(--line-strong); background: #fff; cursor: pointer; }
+.pool-actions button.primary { border: 0; background: var(--primary); color: #fff; }
+.pool-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

@@ -71,6 +71,14 @@ medical:
   lis:
     token: ${MEDICAL_LIS_TOKEN:}
 
+  # ── 自学习审核台（PLAN §8 候选池）──────────────────────────────────
+  # 每日批处理默认**关闭**：自动跑会扫全库就诊写候选池，生产应在低峰期手动触发，
+  # 或由运维在 supervisor/cron 里按机构节奏触发；避免"忘记配置就自动跑"带来的噪声。
+  # 需开启时置 true（并评估对就诊库的压力）。
+  learning:
+    auto-generate-candidates:
+      enabled: ${MEDICAL_LEARNING_AUTO:false}
+
   # 每次认知调用都要留痕：入参快照 / 召回条目 / 模型版本 / 操作者 / 时间。
   # 生产建议落到**独立库**且只授予 INSERT（append-only），与业务库物理隔离。
   audit:

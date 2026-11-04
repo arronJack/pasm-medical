@@ -39,6 +39,44 @@ export interface KbSync {
   cognition?: unknown
 }
 
+/** 自学习候选（审核台）。状态：PENDING 待审 / APPROVED 已采纳 / REJECTED 已驳回 / CONFLICT 冲突挂起。 */
+export interface KbCandidate {
+  id: number
+  docKey: string
+  title: string
+  content: string
+  tags: string[]
+  department: string
+  source: string
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CONFLICT'
+  /** 抽取完整度启发式评分（0~1），辅助排序，非临床确定性。 */
+  confidence: number
+  /** 冲突时指向现库资料键。 */
+  conflictWith: string
+  /** 生成依据（来源就诊 ref / 命中规则）。 */
+  evidence: string
+  poolVersion: string
+  reviewedBy: string
+  createdAt: string
+  reviewedAt: string
+}
+
+/** 知识池版本信息。 */
+export interface KbPoolVersion {
+  version: number
+  rollbackAvailable: boolean
+  docsAtVersion: number
+}
+
+/** 每日批处理生成候选的报告。 */
+export interface CandidateGenerateReport {
+  generated: number
+  deduplicated: number
+  conflict: number
+  pendingTotal: number
+  ids: number[]
+}
+
 /**
  * 当前身份（`GET /api/auth/me`）。
  *
@@ -226,6 +264,31 @@ export const api = {
       '/admin/kb/' + encodeURIComponent(docKey), { method: 'DELETE' }),
 
   adminKbSync: () => call<KbSync>('/admin/kb/sync', { method: 'POST' }),
+
+  // ── 审核台：自学习候选池（PLAN §8）──
+  /**
+   * 候选列表。status 缺省 = 待审 + 冲突 + 已采纳（不含已驳回）。
+   * 科室管理员只看本科室的候选（空科室候选仅超管可见，与资料库同规则）。
+   */
+  adminCandidates: (status?: string) =>
+    call<KbCandidate[]>('/admin/kb/candidates' + (status ? '?status=' + encodeURIComponent(status) : '')),
+  /** 触发每日批处理（生成候选）。仅超管：会扫全库就诊写候选池。 */
+  adminGenerateCandidates: (days = 7) =>
+    call<CandidateGenerateReport>('/admin/kb/candidates/generate?days=' + days, { method: 'POST' }),
+  /** 采纳候选：入库 + 知识池版本 +1 + 同步认知侧。科室管理员只能审本科室。 */
+  adminApproveCandidate: (id: number) =>
+    call<{ ok: boolean; docKey: string; poolVersion: number; sync: KbSync; candidate: KbCandidate }>(
+      '/admin/kb/candidates/' + id + '/approve', { method: 'POST' }),
+  /** 驳回候选（绝不入库）。 */
+  adminRejectCandidate: (id: number) =>
+    call<{ ok: boolean; candidate: KbCandidate }>(
+      '/admin/kb/candidates/' + id + '/reject', { method: 'POST' }),
+  /** 知识池版本信息（含是否可回滚）。 */
+  adminKbPoolVersion: () => call<KbPoolVersion>('/admin/kb-pool/version'),
+  /** 知识池回滚（停用上一版本引入的资料）。仅超管。 */
+  adminKbPoolRollback: () =>
+    call<{ ok: boolean; from: number; to: number; deactivated: number; sync: KbSync }>(
+      '/admin/kb-pool/rollback', { method: 'POST' }),
 
   /**
    * 后台：运营统计。

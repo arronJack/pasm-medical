@@ -1,8 +1,10 @@
 package com.pasm.medical.bootstrap;
 
 import com.pasm.medical.domain.Encounter;
+import com.pasm.medical.domain.KbCandidate;
 import com.pasm.medical.domain.Patient;
 import com.pasm.medical.repository.EncounterRepository;
+import com.pasm.medical.repository.KbCandidateRepository;
 import com.pasm.medical.repository.PatientRepository;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
@@ -26,7 +28,8 @@ import java.time.Instant;
 public class DemoDataSeeder {
 
     @Bean
-    public CommandLineRunner seed(PatientRepository patients, EncounterRepository encounters) {
+    public CommandLineRunner seed(PatientRepository patients, EncounterRepository encounters,
+                                 KbCandidateRepository candidates) {
         return args -> {
             if (patients.count() > 0) {
                 return;
@@ -85,6 +88,32 @@ public class DemoDataSeeder {
             e3.setTriageUrgency("routine");
             e3.setSummaryText("主诉：右膝疼痛 1 周；判断：考虑退行性改变，建议进一步检查；处置：骨科门诊复诊");
             encounters.save(e3);
+
+            // ★ 演示候选（审核台样例）：让"审核台"页一进来就有内容可看，
+            //   而不是空空如也让人误以为接口没通。都标记为 PENDING（待人工审核，绝不直接生效）。
+            seedCandidate(candidates, "发热 3 天", "判断：上呼吸道感染；处置：对症处理，观察体温",
+                    "发热门诊", 0.78, "demo-fp-发热3天",
+                    "source=encounter;ref=demo-patient-001;派生自演示就诊");
+            seedCandidate(candidates, "胸痛", "判断：可疑心源性胸痛；处置：急诊转诊，完善心电图与肌钙蛋白",
+                    "心内科 / 急诊内科", 0.82, "demo-fp-胸痛",
+                    "source=encounter;ref=demo-patient-001;派生自演示就诊");
         };
+    }
+
+    /** 埋一条 PENDING 演示候选（指纹用固定串，仅演示去重占位）。 */
+    private static void seedCandidate(KbCandidateRepository candidates, String title, String content,
+                                     String department, double confidence, String fingerprint, String evidence) {
+        KbCandidate c = new KbCandidate();
+        c.setTitle(title);
+        c.setContent(content);
+        c.setTags(department + ",经验");
+        c.setDepartment(department);
+        c.setSource("demo");
+        c.setStatus(KbCandidate.PENDING);
+        c.setConfidence(confidence);
+        c.setFingerprint(fingerprint);
+        c.setEvidence(evidence);
+        c.setCreatedAt(Instant.now());
+        candidates.save(c);
     }
 }

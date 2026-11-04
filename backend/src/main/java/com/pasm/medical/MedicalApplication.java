@@ -3,6 +3,7 @@ package com.pasm.medical;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 医院智能诊疗辅助系统 · 业务层入口。
@@ -13,6 +14,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
  */
 @SpringBootApplication
 @EnableConfigurationProperties(CognitionProperties.class)
+@EnableScheduling
 public class MedicalApplication {
 
     public static void main(String[] args) {

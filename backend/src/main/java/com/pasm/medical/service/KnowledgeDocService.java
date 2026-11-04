@@ -75,6 +75,40 @@ public class KnowledgeDocService {
         return repo.countByStatus(INACTIVE);
     }
 
+    /** 当前生效资料全集（审核台"采纳候选"前用它做冲突检测）。 */
+    public List<KnowledgeDoc> listActive() {
+        return repo.findByStatusOrderByUpdatedAtDesc(ACTIVE);
+    }
+
+    /** 某版本号的资料条数（知识池版本信息用）。 */
+    public long countByVersion(String version) {
+        return version == null ? 0 : repo.countByVersion(version);
+    }
+
+    /**
+     * 知识池回滚：停用某一版本引入的所有资料（下架但不删，仍可审计、可再上架）。
+     *
+     * <p>★ 回滚只改"是否作为依据"，不销毁历史：被停用的资料仍在业务库里，
+     * 审查"哪一版引入了什么"完全可追溯。停用后同步认知侧（全量替换）。
+     *
+     * @return 被停用的资料条数
+     */
+    @Transactional
+    public int deactivateByVersion(String version, String actor) {
+        if (version == null || version.isBlank()) {
+            return 0;
+        }
+        List<KnowledgeDoc> docs = repo.findByVersion(version);
+        for (KnowledgeDoc d : docs) {
+            d.setStatus(INACTIVE);
+            d.setUpdatedAt(Instant.now());
+            d.setUpdatedBy(actor == null ? "" : actor);
+            repo.save(d);
+        }
+        log.info("知识池回滚：停用版本 {} 的资料 {} 条（by {}）", version, docs.size(), actor);
+        return docs.size();
+    }
+
     /**
      * 当前生效资料的 key 集合。
      *

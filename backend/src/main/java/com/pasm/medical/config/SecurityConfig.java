@@ -82,6 +82,9 @@ public class SecurityConfig {
                 .requestMatchers("/api/admin/config").hasRole("SUPER_ADMIN")
                 // 资料库手动全量同步：仅超管（运维操作，推全院生效全集）
                 .requestMatchers("/api/admin/kb/sync").hasRole("SUPER_ADMIN")
+                // 自学习审核台：生成候选（扫全库就诊写候选池）与知识池回滚（停用资料）仅超管
+                .requestMatchers("/api/admin/kb/candidates/generate",
+                        "/api/admin/kb-pool/rollback").hasRole("SUPER_ADMIN")
                 // 资料库其余（列表/新建/更新/上架下架/删除）：超管 + 科室管理员；
                 // 科室管理员只能动本科室（资源级判定在 AdminKbController）
                 .requestMatchers("/api/admin/kb/**")

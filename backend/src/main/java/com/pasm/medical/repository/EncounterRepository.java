@@ -4,11 +4,15 @@ import com.pasm.medical.domain.Encounter;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import java.time.Instant;
 import java.util.List;
 
 public interface EncounterRepository extends JpaRepository<Encounter, Long> {
     List<Encounter> findByPatientRefOrderByOccurredAtDesc(String patientRef);
     long countByPatientRef(String patientRef);
+
+    /** 每日批处理：拉取某时间之后的就诊，作为候选经验抽取的数据源。 */
+    List<Encounter> findByOccurredAtGreaterThanEqual(Instant from);
 
     /**
      * 本科室范围内出现过的患者标识（"本科室"的数据范围就是靠它算出来的）。

@@ -20,4 +20,10 @@ public interface KnowledgeDocRepository extends JpaRepository<KnowledgeDoc, Long
     Optional<KnowledgeDoc> findByDocKey(String docKey);
 
     long countByStatus(String status);
+
+    /** 按版本号查资料（知识池回滚时定位"上一版本引入的资料"）。 */
+    List<KnowledgeDoc> findByVersion(String version);
+
+    /** 某版本号的资料条数（知识池版本信息用）。 */
+    long countByVersion(String version);
 }

@@ -1,18 +1,20 @@
 # 医院智能诊疗辅助系统 · 开发方案与框架设计
 
-> 版本：v0.1（2026-09-21），实现进度更新于 2026-09-22
+> 版本：v0.1（2026-09-21），实现进度更新于 2026-11-04
 
 ---
 
 ## ⚠️ 阅读须知：本文是「设计目标 + 路线图」，不是当前已实现状态
 
 - 当前已落地的是 **MVP**（验证过、能跑），真实能力见 [README「现状与后续」](README.md#现状与后续)。
-- 设计稿中的 **pgvector / MinIO / Redis / SSE 流式 / 自学习闭环** 在 MVP 中**尚未落地** —— 属于目标，不是现状。
+- 设计稿中的 **pgvector / MinIO / Redis / SSE 流式** 在 MVP 中**尚未落地** —— 属于目标，不是现状；**自学习闭环中的「审核台 + 候选池 + 版本回滚」已于 2026-11-04 前移落地**（每日批处理默认关闭，待评测后开启），见下文与 [README「现状与后续」](../README.md#现状与后续)。
   PostgreSQL **已落地**：生产表结构由 Flyway 版本化迁移管理（`db/migration/V1__init.sql`、`V2__lab_results.sql`），
   dev(H2) 与生产共用同一份脚本；见 [DB-MIGRATION.md](DB-MIGRATION.md)。
   **LIS/HL7/FHIR 对接已落地**（HL7 ORU / FHIR Observation 投递 + FHIR 只读投影，
   见 [INTEGRATION-LIS-FHIR.md](INTEGRATION-LIS-FHIR.md)）；但 **MLLP TCP 监听、HL7 ACK 报文、
   LOINC/SNOMED 映射** 仍未实现 —— 边界以该文档第 7 节为准。
+  审核台（human-in-the-loop 自学习出口）+ 候选池 + 知识池版本回滚 **已于 2026-11-04 前移落地**（原属 P3）：
+  见 `KbCandidateService` / `CandidateReviewController` / `db/migration/V3__kb_candidates.sql`；每日批处理默认关闭（环境变量 `MEDICAL_LEARNING_AUTO` 开启）。
   认知服务的**跨请求会话**已抽出可插拔 `SessionStore`（默认 memory / CLI 默认 file），
   单机多 worker 与重启不再丢会话；**多主机**水平扩容仍需接 Redis/DB 实现（协议已就位）。
 - 下文凡标注「（目标）」的，均为 MVP 暂未落地的设计。
@@ -25,7 +27,7 @@
 | 数据标准 | FHIR | **FHIR R4 只读投影已落地**（Patient/Encounter/Observation）；写入只支持 Observation，无 LOINC 映射 |
 | 认知服务 | 无状态、可水平扩容 | 跨请求会话已抽出 `SessionStore`（file 存储：单机多 worker / 重启不丢）；多主机需接 Redis/DB |
 | 前端流式 | SSE | 非流式（一次性响应） |
-| 自学习闭环 | 每日批处理 + 候选池 + 审核台 | 仅分诊候选排序后验（P0.5） |
+| 自学习闭环 | 每日批处理 + 候选池 + 审核台 | **审核台 + 候选池 + 版本回滚已前移落地（P3 内容，2026-11-04）**；每日批处理默认关闭，待评测后开启 |
 | 工程结构 | 多模块（domain/service/cognition…） | 单模块 `backend/src/main/java/com/pasm/medical` + `web/` + `pasm_medical/` |
 
 ---
@@ -395,7 +397,7 @@ GET  /api/cog/status       后端可用性 / 规模 / 版本
 | **P0**（2–3 周） | 打通链路 | 认知 HTTP API + Spring Boot 骨架 + Vue 骨架 + Java SDK 联调 | 低 |
 | **P1**（4–6 周） | 医生助手 MVP | 患者 / 就诊 / 病历 CRUD + 聊天 + 知识库检索 + 审计 | 低 |
 | **P2**（4–6 周） | 认知能力 | 记忆分层 + 患者隔离 + 情绪共情 + 采纳反馈闭环 | 中 |
-| **P3**（6–8 周） | 自学习 | 每日批处理 + 候选池 + 审核台 + 版本回滚 | 中高 |
+| **P3**（6–8 周） | 自学习 | 每日批处理 + 候选池 + 审核台 + 版本回滚（**审核台 + 候选池 + 版本回滚已于 2026-11-04 前移落地**；每日批处理默认关闭） | 中高 |
 | **P5**（4 周） | 中医库 | 术语映射 + 检索 + 配伍禁忌硬规则 | 中 |
 | **P4**（8–12 周） | 多模态 | 语音录入 → 情绪 → 面部体征（仅提示） | **高** |
 | **平行** | 合规 | 回顾性评测、伦理审批、等保、分类界定 | 高 |
