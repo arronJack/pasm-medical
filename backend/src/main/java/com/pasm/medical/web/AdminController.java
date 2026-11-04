@@ -45,9 +45,10 @@ import java.util.Map;
  *       "能进这个接口"就等价于"能看全院所有患者的过敏史"。</li>
  * </ol>
  *
- * <p>⚠️ <b>如实标注</b>：{@code /stats} 目前仍是**全院口径**（科室维度统计尚未实现），
- * 因此它对科室角色会显式带上 {@code scope} 与 {@code scopeNote} ——
- * 标清口径，而不是假装那些数字是本科室的。
+ * <p>★ <b>{@code /stats} 已按数据范围分流</b>：超管 = 全院；医护/科室管理员 =
+ * **本科室患者**（按 {@code patientRef} 集合过滤，空集合直接为 0，不退化成全院）。
+ * 响应始终带 {@code scope} / {@code scopeNote}，让使用者一眼看出数字代表谁 ——
+ * 口径不标清，再准的数字也会被误读。
  */
 @RestController
 @RequestMapping("/api/admin")
@@ -203,35 +204,36 @@ public class AdminController {
         LocalDate today = LocalDate.now(z);
         Instant from = today.atStartOfDay(z).toInstant();
 
-        long consultStartedToday =
-                audits.countByActionAndOccurredAtGreaterThanEqual("consult-start", from);
-        long consultFinishedToday =
-                audits.countByActionAndOccurredAtGreaterThanEqual("consult-finish", from);
-        long redFlagsToday =
-                audits.countByActionAndOccurredAtGreaterThanEqual("consult-redflag", from);
-        long questionsToday = audits.countByActionAndOccurredAtGreaterThanEqual("ask", from);
-        long refusalsToday =
-                audits.countByActionAndRefusedTrueAndOccurredAtGreaterThanEqual("ask", from);
+        // ★ 范围：超管 = 全院；医护/科室管理员 = **本科室患者**。
+        //   以前这里所有 count 都不带范围，科室角色看到的是全院数字 —— 不报错，
+        //   但会让人把"全院"当"本科室"做决策，是统计口径里最危险的一类错。
+        String dept = IdentityContext.scopeDepartment();
+        List<String> inScope = dept == null ? null : encounters.patientRefsInDepartment(dept);
 
-        long consultStartedTotal = audits.countByAction("consult-start");
-        long redFlagsTotal = audits.countByAction("consult-redflag");
-        long questionsTotal = audits.countByAction("ask");
-        long refusalsTotal = audits.countByActionAndRefusedTrue("ask");
-        long adopt = audits.countByAction("feedback-adopt");
-        long reject = audits.countByAction("feedback-reject");
+        long consultStartedToday = countAction("consult-start", from, inScope);
+        long consultFinishedToday = countAction("consult-finish", from, inScope);
+        long redFlagsToday = countAction("consult-redflag", from, inScope);
+        long questionsToday = countAction("ask", from, inScope);
+        long refusalsToday = countAction("ask", from, inScope, true);
+
+        long consultStartedTotal = countAction("consult-start", null, inScope);
+        long redFlagsTotal = countAction("consult-redflag", null, inScope);
+        long questionsTotal = countAction("ask", null, inScope);
+        long refusalsTotal = countAction("ask", null, inScope, true);
+        long adopt = countAction("feedback-adopt", null, inScope);
+        long reject = countAction("feedback-reject", null, inScope);
 
         Map<String, Object> m = new java.util.LinkedHashMap<>();
         // 窗口本身也要返回：数字脱离窗口就无法核对
         m.put("zone", z.getId());
         m.put("windowFrom", from.atZone(z).toString());
         m.put("windowTo", Instant.now().atZone(z).toString());
-        // ★ 数据范围同理必须返回。科室维度统计尚未实现（P3-13），
-        //   所以这里如实标成全院口径，而不是让科室角色把全院数字当成自己的
-        String dept = IdentityContext.scopeDepartment();
+        // ★ 数据范围必须随数字一起返回：不看范围，就无法判断这个数字代表谁。
         m.put("scope", dept == null ? "hospital" : "department:" + dept);
         m.put("scopeNote", dept == null
                 ? "全院口径"
-                : "当前为全院累计口径；科室维度统计尚未实现（见 docs/GUIDE.md 未实现清单）");
+                : "本科室口径：" + dept + "（覆盖本科室患者 " + inScope.size()
+                  + " 人；别科与无归属事件不计入）");
         // 今日
         m.put("consultationsToday", consultStartedToday);
         m.put("consultationsFinishedToday", consultFinishedToday);
@@ -254,6 +256,46 @@ public class AdminController {
         defs.put("adoptionRate", "累计 采纳 / （采纳 + 否决）；用累计是因为一天的反馈样本太小");
         m.put("definitions", defs);
         return ResponseEntity.ok(m);
+    }
+
+    /**
+     * 按数据范围计数。
+     *
+     * @param refs {@code null} = 全院；非 null = 只统计这些患者（本科室）
+     *
+     * <p>★ 集合为空必须**直接返回 0**，不能落到 SQL 的 {@code IN ()} 上：
+     * 不同数据库对空 IN 的处理不一致，而且"科室没有患者"本来就该是 0。
+     * 绝不能退化成"查全部"—— 那是把越权包装成一个看起来正常的数字。
+     */
+    private long countAction(String action, Instant from, List<String> refs) {
+        return countAction(action, from, refs, false);
+    }
+
+    private long countAction(String action, Instant from, List<String> refs,
+                             boolean refusedOnly) {
+        if (refs != null && refs.isEmpty()) {
+            return 0L;
+        }
+        if (refs == null) {
+            if (from == null) {
+                return refusedOnly ? audits.countByActionAndRefusedTrue(action)
+                                   : audits.countByAction(action);
+            }
+            return refusedOnly
+                    ? audits.countByActionAndRefusedTrueAndOccurredAtGreaterThanEqual(
+                            action, from)
+                    : audits.countByActionAndOccurredAtGreaterThanEqual(action, from);
+        }
+        if (from == null) {
+            return refusedOnly
+                    ? audits.countByActionAndRefusedTrueAndPatientRefIn(action, refs)
+                    : audits.countByActionAndPatientRefIn(action, refs);
+        }
+        return refusedOnly
+                ? audits.countByActionAndRefusedTrueAndPatientRefInAndOccurredAtGreaterThanEqual(
+                        action, refs, from)
+                : audits.countByActionAndPatientRefInAndOccurredAtGreaterThanEqual(
+                        action, refs, from);
     }
 
     /** 保留两位小数的比率。分母为 0 时返回 0 —— 不能返回 NaN，JSON 里的 NaN 会让前端解析失败。 */

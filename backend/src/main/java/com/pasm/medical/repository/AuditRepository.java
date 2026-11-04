@@ -46,6 +46,19 @@ public interface AuditRepository extends JpaRepository<AiAudit, Long> {
 
     long countByActionAndRefusedTrue(String action);
 
+    // ---- 科室维度统计（★ 按 patientRef 集合过滤，而不是把全院数字当本科室）----
+
+    long countByActionAndPatientRefIn(String action, Collection<String> patientRefs);
+
+    long countByActionAndPatientRefInAndOccurredAtGreaterThanEqual(
+            String action, Collection<String> patientRefs, Instant from);
+
+    long countByActionAndRefusedTrueAndPatientRefIn(
+            String action, Collection<String> patientRefs);
+
+    long countByActionAndRefusedTrueAndPatientRefInAndOccurredAtGreaterThanEqual(
+            String action, Collection<String> patientRefs, Instant from);
+
     /**
      * 时间窗内的计数。
      *

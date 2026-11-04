@@ -509,6 +509,34 @@ def main() -> int:                                # noqa: C901
                   st == 200 and "demo-patient-001" in refs
                   and "demo-patient-002" not in refs,
                   "%s %s" % (st, refs))
+
+            # ---------- 10c-1) 科室维度统计
+            #   ★ 以前 /stats 是全院口径：科室角色看到的是全院数字，不报错但会误判。
+            #   判据不是"字段存在"，而是「别科患者起问诊后，本科室数字不动、全院数字 +1」——
+            #   只断言 scope 字段会假绿（字段在、数字仍可能是全院的）。
+            st_s, ds0 = req("GET", base + "/api/admin/stats", token=dtoken)
+            st_h, dh0 = req("GET", base + "/api/admin/stats", token=token)
+            check("★ 科室统计口径标为部门（不是全院）",
+                  st_s == 200 and str(ds0.get("scope", "")).startswith("department:")
+                  and "本科室" in str(ds0.get("scopeNote", "")),
+                  str(ds0)[:200])
+            req("POST", base + "/api/consult/start",
+                {"patientRef": "demo-patient-002", "chiefComplaint": "膝盖疼"},
+                token=token)
+            st_s, ds1 = req("GET", base + "/api/admin/stats", token=dtoken)
+            st_h, dh1 = req("GET", base + "/api/admin/stats", token=token)
+            check("★ 反例：别科（骨科）患者起问诊，本科室统计不增加（真按科室过滤）",
+                  st_s == 200 and isinstance(ds0.get("consultationsToday"), int)
+                  and isinstance(ds1.get("consultationsToday"), int)
+                  and ds1.get("consultationsToday") == ds0.get("consultationsToday"),
+                  "dept before=%s after=%s"
+                  % (ds0.get("consultationsToday"), ds1.get("consultationsToday")))
+            check("★ 同一事件全院口径 +1（证明事件确实写入，不是统计没跑）",
+                  st_h == 200 and isinstance(dh0.get("consultationsToday"), int)
+                  and isinstance(dh1.get("consultationsToday"), int)
+                  and dh1.get("consultationsToday") == dh0.get("consultationsToday") + 1,
+                  "hospital before=%s after=%s"
+                  % (dh0.get("consultationsToday"), dh1.get("consultationsToday")))
             st, d = req("POST", base + "/api/admin/config",
                         {"ocr": "builtin", "lis": "none", "llm": "ollama"}, token=dtoken)
             check("★ 反例：医护改系统配置 → 403（仅超管；它决定患者数据会不会出网）",
