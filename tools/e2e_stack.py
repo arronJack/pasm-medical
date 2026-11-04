@@ -117,11 +117,12 @@ def main() -> int:                                # noqa: C901
     print("三端联调验证（Python 认知服务 + Spring Boot 业务层）")
     print("-" * 66)
 
-    jar = None
-    for p in sorted(BACKEND.glob("target/*.jar")):
-        if "sources" not in p.name and "javadoc" not in p.name:
-            jar = p
-            break
+    # ★ 必须按**修改时间**取最新，不能按文件名排序：target/ 里可能同时躺着
+    #   0.1.0 / 0.1.1 两个 jar，字符串排序会永远选到旧的那个 —— 于是"跑的是旧代码，
+    #   却以为在验新版本"，而且不会报错。
+    jars = [p for p in BACKEND.glob("target/*.jar")
+            if "sources" not in p.name and "javadoc" not in p.name]
+    jar = max(jars, key=lambda p: p.stat().st_mtime) if jars else None
     if jar is None:
         print("[中止] 没找到后端 jar，先跑：cd backend && mvn -DskipTests package")
         return 2

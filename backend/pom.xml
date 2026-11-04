@@ -31,7 +31,8 @@
 
   <groupId>com.pasm</groupId>
   <artifactId>pasm-medical-backend</artifactId>
-  <version>0.1.0</version>
+  <!-- 与 Python 包版本保持一致：同一个仓、同一次发布，版本号不该有两套说法。 -->
+  <version>0.1.1</version>
   <name>pasm-medical-backend</name>
   <description>医院智能诊疗辅助系统 · 业务层（Spring Boot）</description>
 
@@ -79,9 +80,33 @@
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
 
+    <!-- ★ Flyway：生产库结构由**版本化迁移**管理（db/migration/V*.sql），
+         不再依赖 Hibernate 自动改表。配合 application.yml 的 ddl-auto=validate：
+         迁移负责"建/改"，JPA 只负责"校验实体与真实表是否一致"。
+         医疗系统的表结构变更要走评审与变更单 —— 迁移脚本正好是可评审的那份产物。 -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <!-- ⚠ Flyway 10 起数据库支持按模块拆分：PostgreSQL 必须单独引入，
+         否则启动报 "No Flyway database plugin found for jdbc:postgresql..."。 -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- ★ 嵌入式 PostgreSQL：迁移脚本必须在**真正的 PostgreSQL** 上验过，
+         不能只靠 H2 的"大体兼容"。它免 Docker（CI 也能跑），启动一次真实 PG 二进制，
+         跑 Flyway + 断言 schema。整应用级冒烟见 tools/pg_smoke.py（需要 Docker）。 -->
+    <dependency>
+      <groupId>io.zonky.test</groupId>
+      <artifactId>embedded-postgres</artifactId>
+      <version>2.0.7</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

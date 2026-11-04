@@ -1,0 +1,32 @@
+# 本地 PostgreSQL（与生产同款），用于联调、迁移验证与分发冒烟。
+#
+#   docker compose up -d
+#   export MEDICAL_DB_URL=jdbc:postgresql://127.0.0.1:5432/pasm_medical
+#   export MEDICAL_DB_USER=pasm_medical
+#   export MEDICAL_DB_PASSWORD=pasm_medical_dev
+#   export MEDICAL_AUTH_JWT_SECRET="$(openssl rand -base64 48)"
+#   java -jar backend/target/pasm-medical-backend-*.jar
+#
+# 表结构由 Flyway 在启动时自动迁移（backend/src/main/resources/db/migration/）。
+# ⚠ 这里的口令仅用于本地开发，生产必须走密钥管理，不要提交真实口令。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pasm-medical-pg
+    environment:
+      POSTGRES_DB: pasm_medical
+      POSTGRES_USER: pasm_medical
+      POSTGRES_PASSWORD: pasm_medical_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pasm-medical-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pasm_medical -d pasm_medical"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pasm-medical-pg-data:

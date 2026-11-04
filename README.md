@@ -101,6 +101,9 @@ cd backend && mvn spring-boot:run -Dspring-boot.run.profiles=dev   # http://127.
 #    演示账号（仅 dev，密码均 123456）：staff（超管·全院）、deptadmin（科室管理员·发热门诊）、
 #    doctor（医护·发热门诊）、patient（患者·绑定 demo-patient-001）
 #    注意：非 dev 档演示账号默认关闭，且需要 PostgreSQL
+#    生产档：`docker compose up -d` 起同款 PG，再按 application.yml 的环境变量启动；
+#    表结构由 **Flyway** 在启动时自动迁移（backend/src/main/resources/db/migration/），
+#    运维与新增迁移的规则见 docs/DB-MIGRATION.md
 
 # 3) Vue 前端
 cd web && npm install && npm run dev       # http://127.0.0.1:5173

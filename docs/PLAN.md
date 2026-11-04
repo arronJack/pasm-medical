@@ -7,7 +7,9 @@
 ## ⚠️ 阅读须知：本文是「设计目标 + 路线图」，不是当前已实现状态
 
 - 当前已落地的是 **MVP**（验证过、能跑），真实能力见 [README「现状与后续」](README.md#现状与后续)。
-- 设计稿中的 **PostgreSQL / pgvector / MinIO / Redis / FHIR / SSE 流式 / 自学习闭环 / LIS-HL7 适配器** 在 MVP 中**尚未落地** —— 属于目标，不是现状。
+- 设计稿中的 **pgvector / MinIO / Redis / FHIR / SSE 流式 / 自学习闭环 / LIS-HL7 适配器** 在 MVP 中**尚未落地** —— 属于目标，不是现状。
+  PostgreSQL **已落地**：生产表结构由 Flyway 版本化迁移管理（`db/migration/V1__init.sql`），
+  dev(H2) 与生产共用同一份脚本；见 [DB-MIGRATION.md](DB-MIGRATION.md)。
   认知服务的**跨请求会话**已抽出可插拔 `SessionStore`（默认 memory / CLI 默认 file），
   单机多 worker 与重启不再丢会话；**多主机**水平扩容仍需接 Redis/DB 实现（协议已就位）。
 - 下文凡标注「（目标）」的，均为 MVP 暂未落地的设计。
@@ -15,7 +17,7 @@
 | 维度 | PLAN 设计目标 | 当前 MVP 实际（2026-11-04） |
 |---|---|---|
 | 语言 / JDK | Java 21 | Java 17（JPA，非 MyBatis-Plus） |
-| 数据库 | PostgreSQL + pgvector | H2 内存（dev）；可切 PG 但**无迁移脚本** |
+| 数据库 | PostgreSQL + pgvector | **PostgreSQL + Flyway 迁移已落地**（`db/migration/V1__init.sql`，dev 的 H2 共用同一份）；pgvector 未用 |
 | 缓存 / 对象存储 | Redis + MinIO | 无（会话状态走 `SessionStore`：memory / file；认知记忆按 agent 落盘） |
 | 数据标准 | FHIR | 自造 JPA schema；仅 `Encounter` 保留最小 FHIR 投影 |
 | 认知服务 | 无状态、可水平扩容 | 跨请求会话已抽出 `SessionStore`（file 存储：单机多 worker / 重启不丢）；多主机需接 Redis/DB |
