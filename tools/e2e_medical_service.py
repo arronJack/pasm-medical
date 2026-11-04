@@ -125,6 +125,32 @@ def main() -> int:                                          # noqa: C901
               agent_id_for("h1", pa) != agent_id_for("h2", pa),
               "%s / %s" % (agent_id_for("h1", pa), agent_id_for("h2", pa)))
 
+        # ---------- 2b. 会话存储跨实例共享（多 worker / 重启不丢）
+        #   ★ 以前问诊会话存在进程内 dict 里：请求被负载均衡打到另一个实例，
+        #     就会得到"没有进行中的问诊"——看起来像 bug，其实是状态不在这一台。
+        #   这里用**同一个 file 存储目录**建两个 service 实例（= 两个 worker）：
+        #   A 开问诊 → B 回答 → 断言成功。
+        from pasm_medical.store import FileSessionStore
+        shared = os.path.join(tmp, "shared_sessions")
+        svc_a = build_service(tenant="h1", kb_dir=os.path.join(tmp, "kb2"),
+                              persist_dir=os.path.join(tmp, "persist2a"),
+                              host="127.0.0.1", port=0, token=TOKEN,
+                              workspace=tmp, store=FileSessionStore(shared))
+        svc_b = build_service(tenant="h1", kb_dir=os.path.join(tmp, "kb2"),
+                              persist_dir=os.path.join(tmp, "persist2b"),
+                              host="127.0.0.1", port=0, token=TOKEN,
+                              workspace=tmp, store=FileSessionStore(shared))
+        r1 = svc_a.start_consult(pa, "胸痛 2 小时")
+        r2 = svc_b.answer_consult("往左肩和后背串", patient_ref=pa)
+        check("★ 会话存储跨实例共享：A 开问诊、B 能接着回答（多 worker 不再丢会话）",
+              bool(r1.get("ok")) and bool(r2.get("ok")),
+              "start=%s answer=%s" % (str(r1)[:90], str(r2)[:140]))
+        # 再断言"确实是同一份状态"：B 写入的答案，A 读取的会话里也应该有
+        s_a = svc_a._get_consult(svc_a._session_key(pa, ""))
+        check("★ 跨实例读到同一份会话状态（不是各存各的）",
+              s_a is not None and "往左肩和后背串" in str(getattr(s_a, "facts", {})),
+              "facts=%s" % (str(getattr(s_a, "facts", {}))[:160] if s_a else "None"))
+
         # ---------- 3. 就诊写入 + 时间轴
         enc = Encounter(encounter_id="E20260921001", patient_ref=pa,
                         occurred_at="2026-09-21T10:30:00+08:00",

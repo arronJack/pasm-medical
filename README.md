@@ -89,6 +89,10 @@ PASM 的知识库与记忆**默认落点是全机共享**的（不给目录就�
 pip install "pasm-skills>=0.6.2" "pasm-framework>=0.5.3"
 pip install -e .
 PASM_MEDICAL_TOKEN=<管理令牌> python -m pasm_medical.service --port 8090
+#    跨请求会话存储（进行中的问诊 / 待确认检验单）：
+#      默认 --session-store file（目录 <--dir>/sessions）→ 重启不丢、单机多 worker 共享；
+#      临时联调可 --session-store memory（进程内，退出即清）；
+#      多主机部署请实现 pasm_medical/store.py 里 SessionStore 协议的 Redis/DB 版本。
 
 # 2) Spring Boot 后端（dev 档 = H2 内存库 + 演示账号，无需外部数据库）
 #    ★ 需 JDK 17+：先 `mvn -version` 确认打出来的是 17.x。JAVA_HOME 未设时 Maven 会

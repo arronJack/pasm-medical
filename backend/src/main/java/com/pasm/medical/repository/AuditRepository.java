@@ -1,6 +1,8 @@
 package com.pasm.medical.repository;
 
 import com.pasm.medical.domain.AiAudit;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.time.Instant;
@@ -9,7 +11,21 @@ import java.util.List;
 
 public interface AuditRepository extends JpaRepository<AiAudit, Long> {
 
-    /** 审计面板用：最近 200 条。★ 只能用于「展示」，**不能**用它做统计口径。 */
+    /**
+     * 审计面板用：**分页**读取（按时间倒序）。
+     *
+     * <p>★ 旧接口固定 {@code findTop200...}，超过 200 条就更早的记录在界面上翻不到 ——
+     * 对"只增不改"的合规库来说这是静默丢历史。展示请一律走分页方法，
+     * 统计请走下面的 {@code countBy...} 方法（不要拿展示数据算指标）。
+     */
+    Page<AiAudit> findAllByOrderByOccurredAtDesc(Pageable pageable);
+
+    /** 科室范围的分页版本：在库里筛 + 分页，避免"先取一批再内存过滤"导致静默变空。 */
+    Page<AiAudit> findByPatientRefInOrderByOccurredAtDesc(
+            Collection<String> patientRefs, Pageable pageable);
+
+    /** @deprecated 固定 200 条会丢历史；仅为兼容保留，新代码请用分页方法。 */
+    @Deprecated
     List<AiAudit> findTop200ByOrderByOccurredAtDesc();
 
     List<AiAudit> findByPatientRefOrderByOccurredAtDesc(String patientRef);
@@ -21,6 +37,8 @@ public interface AuditRepository extends JpaRepository<AiAudit, Long> {
      * 本科室的事件不落在那 200 条里时，界面会**静默变空**，
      * 看起来像"本科室没有活动"，实际是筛选方式错了。
      */
+    /** @deprecated 固定 200 条会丢历史；仅为兼容保留，新代码请用分页方法。 */
+    @Deprecated
     List<AiAudit> findTop200ByPatientRefInOrderByOccurredAtDesc(
             Collection<String> patientRefs);
 

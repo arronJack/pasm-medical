@@ -208,6 +208,25 @@ def main() -> int:                                # noqa: C901
         token = d.get("token")
         check("登录成功返回令牌", st == 200 and bool(token), str(d)[:120])
 
+        # ★ JWT（HS256）：身份写在令牌声明里，服务端不存会话。
+        #   ① 篡改签名必须 401 —— 否则"令牌长得像"就能进；
+        #   ② 登出后原令牌必须**立即**失效（撤销表），不是等它自然过期。
+        parts = token.split(".") if isinstance(token, str) else []
+        tampered = (".".join(parts[:2] + ["AAAA"]) if len(parts) == 3
+                    else "bad.token.signature")
+        st, _ = req("GET", base + "/api/auth/me", token=tampered)
+        check("★ 篡改签名的 JWT 必须 401（签名校验真的在跑）", st == 401, str(st))
+
+        st, d2 = req("POST", base + "/api/auth/login",
+                     {"username": "staff", "password": "123456"})
+        tok2 = d2.get("token")
+        st, _ = req("GET", base + "/api/auth/me", token=tok2)
+        ok_before = st == 200
+        req("POST", base + "/api/auth/logout", token=tok2)
+        st, _ = req("GET", base + "/api/auth/me", token=tok2)
+        check("★ 登出后原令牌立即失效（撤销表生效，不等自然过期）",
+              ok_before and st == 401, "登出前=%s 登出后=%s" % (ok_before, st))
+
         # ---------- 4) 薄转发：业务层 → 认知服务（问诊树）
         st, d = req("POST", base + "/api/consult/start",
                     {"patientRef": "p1", "chiefComplaint": "胸口有点闷"}, token=token)
@@ -301,6 +320,17 @@ def main() -> int:                                # noqa: C901
         check("★ 后台 /api/admin/audit 返回审计（append-only）",
               st == 200 and isinstance(d, list), str(d)[:160])
 
+        # ★ 审计分页：旧实现固定 findTop200 —— 超过 200 条后更早的记录翻不到，
+        #   而且不报错（界面看起来"更早没有记录"）。这里验证 page/size 真的生效。
+        st1, p1 = req("GET", base + "/api/admin/audit?page=0&size=1", token=token)
+        st2, p2 = req("GET", base + "/api/admin/audit?page=1&size=1", token=token)
+        check("★ 审计分页：page/size 生效，且第二页能取到不同记录（不再 200 条封顶）",
+              st1 == 200 and st2 == 200
+              and isinstance(p1, list) and isinstance(p2, list)
+              and len(p1) == 1 and len(p2) == 1
+              and p1[0].get("id") != p2[0].get("id"),
+              "p1=%s p2=%s" % (str(p1)[:90], str(p2)[:90]))
+
         reads = [a for a in d if a.get("action") == "read-patient"
                  and a.get("ref") == "demo-patient-001"] if isinstance(d, list) else []
         check("★ 读审计：查看患者档案必须留痕，且带正确操作者"
@@ -318,6 +348,20 @@ def main() -> int:                                # noqa: C901
               "（旧接口不返回该字段 → 后台看不到患者问了什么）",
               bool(asks) and asks[0].get("actor") == "staff",
               "命中 %d 条 %s" % (len(asks), str(asks[:1])[:200]))
+
+        # ★ 薄转发层审计修复（P0 自洽）：consult-start 的 inputSnapshot 必须含主诉原文，
+        #   而不是只有 "path=/api/consult/start"（旧实现查不出患者当时说了什么）。
+        #   这条正好是 MedicalProxyController.auditForward 的回归钉。
+        marker2 = "e2e-consult-start-9b2c"
+        req("POST", base + "/api/consult/start",
+            {"patientRef": "audit-probe", "chiefComplaint": marker2}, token=token)
+        st, d3 = req("GET", base + "/api/admin/audit", token=token)
+        starts = [a for a in (d3 if isinstance(d3, list) else [])
+                  if a.get("action") == "consult-start"
+                  and marker2 in str(a.get("inputSnapshot") or "")]
+        check("★ 审计带问题原文：consult-start 的 inputSnapshot 含主诉（薄转发层修复，不再只存 path）",
+              bool(starts) and starts[0].get("actor") == "staff",
+              "命中 %d 条 %s" % (len(starts), str(starts[:1])[:200]))
 
         # ---------- 7.5) 资料库：真的可增删，而且真的会影响问答 ----------
         #   ★ 判据必须落在"资料进了回答依据"（sources 里有 kind=doc 的条目），

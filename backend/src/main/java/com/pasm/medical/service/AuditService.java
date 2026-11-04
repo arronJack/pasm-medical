@@ -4,6 +4,8 @@ import com.pasm.medical.domain.AiAudit;
 import com.pasm.medical.repository.AuditRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.Authentication;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -83,8 +85,18 @@ public class AuditService {
         repo.save(a);
     }
 
-    public List<AiAudit> recent() {
-        return repo.findTop200ByOrderByOccurredAtDesc();
+    /**
+     * 展示用：最近 {@code limit} 条（上限 500）。
+     *
+     * <p>★ 不再固定 200：审计库是"只增不改"的合规数据，固定窗口会让更早的记录
+     * **翻不到也看不见**，而且不报错。后台面板请走 {@code /api/admin/audit} 的分页参数；
+     * 这里保留一个带显式 limit 的便捷方法，供内部脚本 / 导出使用。
+     */
+    public List<AiAudit> recent(int limit) {
+        int n = Math.min(Math.max(1, limit), 500);
+        return repo.findAll(PageRequest.of(0, n,
+                        Sort.by(Sort.Direction.DESC, "occurredAt")))
+                .getContent();
     }
 
     public List<AiAudit> byPatient(String ref) {

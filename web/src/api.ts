@@ -181,8 +181,11 @@ export const api = {
    * `inputSnapshot` 是这次操作的输入快照 —— 问答（`ask`）时里面就是**患者问题的原文**，
    * 读类事件里是 `ref=… / encounterId=…`。它超过 300 字会被截断，`inputTruncated` 标明
    * 「这是截断后的」，别把省略号当成用户输入的原文。
+   *
+   * ★ 分页：`page` 从 0 开始，`size` 服务端上限 500。旧接口固定只给最近 200 条，
+   * 更早的审计**翻不到** —— 对"只增不改"的合规库来说等于静默丢历史。
    */
-  adminAudit: () =>
+  adminAudit: (page = 0, size = 200) =>
     call<{
       id: number
       time: string
@@ -194,7 +197,7 @@ export const api = {
       refused: boolean
       inputSnapshot: string
       inputTruncated: boolean
-    }[]>('/admin/audit'),
+    }[]>(`/admin/audit?page=${page}&size=${size}`),
 
   /**
    * 后台：资料库（**业务库是权威**，认知侧只放一份"当前生效资料"的检索副本）。

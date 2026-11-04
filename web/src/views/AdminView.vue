@@ -147,6 +147,14 @@
             </tr>
           </tbody>
         </table>
+        <div class="audit-more">
+          <span class="hint">已加载 {{ audit.length }} 条</span>
+          <button v-if="auditHasMore" class="ghost" :disabled="loading"
+                  @click="loadMoreAudit">
+            {{ loading ? '加载中…' : '加载更早的审计' }}
+          </button>
+          <span v-else class="hint">已经是全部了</span>
+        </div>
         <p class="hint">
           每条 AI 输出都必须可追溯到「输入快照 + 召回条目 + 模型版本 + 操作者」。
           生产环境审计库应**独立且只授予 INSERT**，与业务库物理隔离。
@@ -272,6 +280,14 @@ interface AuditRow {
   model: string
 }
 const audit = ref<AuditRow[]>([])
+/**
+ * 审计分页游标（0 基）。
+ * ★ 旧接口固定只返回最近 200 条，更早的审计在界面上**翻不到** ——
+ *   对"只增不改"的合规库来说等于静默丢历史。现在按页向后翻。
+ */
+const auditPage = ref(0)
+const auditHasMore = ref(false)
+const AUDIT_PAGE_SIZE = 200
 const loading = ref(false)
 const err = ref('')
 
@@ -426,6 +442,44 @@ async function saveConfig() {
   }
 }
 
+/**
+ * 审计行映射。
+ * 直接映射而不是 as Record<string, unknown>：`adminAudit` 的类型是精确的，
+ * 保留类型检查才能挡住"接口改了字段名、前端读 undefined"这类静默失效。
+ */
+function mapAudit(rows: Awaited<ReturnType<typeof api.adminAudit>>): AuditRow[] {
+  return rows.map(a => ({
+    id: a.id,
+    time: a.time,
+    actor: a.actor,
+    ref: a.ref,
+    act: a.action,
+    ev: a.evidenceCount,
+    input: a.inputSnapshot,
+    inputTruncated: a.inputTruncated,
+    refused: a.refused,
+    model: a.modelVersion,
+  }))
+}
+
+/** 向后翻一页（更早的审计）。旧接口固定 200 条，超过就再也看不到了。 */
+async function loadMoreAudit() {
+  if (loading.value || !auditHasMore.value) return
+  loading.value = true
+  err.value = ''
+  try {
+    const next = auditPage.value + 1
+    const rows = await api.adminAudit(next, AUDIT_PAGE_SIZE)
+    audit.value = audit.value.concat(mapAudit(rows))
+    auditPage.value = next
+    auditHasMore.value = rows.length === AUDIT_PAGE_SIZE
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    loading.value = false
+  }
+}
+
 async function load() {
   loading.value = true
   err.value = ''
@@ -433,8 +487,10 @@ async function load() {
   me.value = await ensureIdentity()
   try {
     const [ps, st, au] = await Promise.all([
-      api.adminPatients(), api.adminStats(), api.adminAudit(),
+      api.adminPatients(), api.adminStats(), api.adminAudit(0, AUDIT_PAGE_SIZE),
     ])
+    auditPage.value = 0
+    auditHasMore.value = au.length === AUDIT_PAGE_SIZE
     patients.value = ps as PatientRow[]
     // ★ 口径写在卡片说明里：数字脱离口径无法核对，光给个 0.12 谁也不知道它算的是什么。
     // 用 unknown 而不是 number：这个响应里既有数字也有字符串（zone / windowFrom / definitions）
@@ -464,20 +520,7 @@ async function load() {
         note: `累计 采纳 /（采纳 + 否决），样本 ${n('feedbackTotal')} 次；用累计是因为单日反馈样本太小`,
       },
     ]
-    // 直接映射而不是 as Record<string, unknown>：adminAudit 的类型是精确的，
-    // 保留类型检查才能挡住"接口改了字段名、前端读 undefined"这类静默失效。
-    audit.value = au.map(a => ({
-      id: a.id,
-      time: a.time,
-      actor: a.actor,
-      ref: a.ref,
-      act: a.action,
-      ev: a.evidenceCount,
-      input: a.inputSnapshot,
-      inputTruncated: a.inputTruncated,
-      refused: a.refused,
-      model: a.modelVersion,
-    }))
+    audit.value = mapAudit(au)
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -576,4 +619,12 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
   font-family: ui-monospace, Consolas, monospace; font-size: 11px;
   background: #fff; padding: 1px 4px; border-radius: 4px;
 }
+
+/* 审计分页：旧接口固定 200 条，更早的记录翻不到 —— 现在可以向后加载 */
+.audit-more { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.audit-more button {
+  padding: 6px 12px; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: #fff; font-size: 12px; cursor: pointer;
+}
+.audit-more button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

@@ -116,6 +116,8 @@
         <button class="primary" :disabled="readonly || busy || !draft.trim()" @click="send">
           {{ busy ? '处理中…' : '发送' }}
         </button>
+        <button v-if="canFinish" class="ghost" :disabled="busy" title="把本次问询归档为一条就诊记录"
+                @click="finishConsult">结束问诊</button>
       </div>
     </section>
 
@@ -232,6 +234,9 @@ const urgencyText = computed(() => {
   const u = triage.value?.urgency
   return u === 'emergency' ? '紧急' : u === 'urgent' ? '尽快' : '常规'
 })
+
+/** 有进行中的问诊且非只读时，才显示「结束问诊」入口（落 Encounter 到业务库）。 */
+const canFinish = computed(() => !!state.value && !readonly.value)
 
 const history = ref<{ id: string; time: string; title: string; summary: string; urgency?: string }[]>([])
 
@@ -358,6 +363,33 @@ async function confirmLab() {
     messages.value.push({ role: 'assistant', text: '已写入病历（' + r.written + ' 项）。' })
   } catch (e) {
     messages.value.push({ role: 'assistant', text: '确认失败：' + (e instanceof Error ? e.message : e) })
+  }
+}
+
+/**
+ * 结束问诊：调 /consult/finish 把本次问询**落一条 Encounter 到业务库**
+ * （左栏历史与后台时间轴的真实数据源，而非前端硬编码）。
+ *
+ * ★ 落库后把 state 置空：Python 侧 finish 已 pop 掉会话，
+ *   下一次描述症状会经 send() → startConsult 开启**全新**问诊，不会接上旧会话。
+ *   刚归档的问询通过 loadPatient() 立即出现在左栏历史里。
+ */
+async function finishConsult() {
+  if (!state.value || readonly.value || busy.value) return
+  busy.value = true
+  try {
+    const r = await api.finishConsult(patient.value.ref, sessionKey)
+    state.value = null
+    await loadPatient()
+    messages.value.push({
+      role: 'assistant',
+      text: '本次问询已结束并归档。' + (r.triage ? '分诊建议：' + r.triage.suggested_department : ''),
+    })
+  } catch (e) {
+    messages.value.push({ role: 'assistant', text: '归档失败：' + (e instanceof Error ? e.message : e) })
+  } finally {
+    busy.value = false
+    await scrollDown()
   }
 }
 

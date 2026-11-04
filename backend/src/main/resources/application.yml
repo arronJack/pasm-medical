@@ -43,6 +43,13 @@ medical:
     #   （见 application-dev.yml）。生产必须接入医院统一身份：
     #   OIDC/OAuth2 或签名 JWT（带过期与刷新），并把患者 ref 作为 claim 绑定进令牌。
     demo-login-enabled: ${MEDICAL_AUTH_DEMO_LOGIN:false}
+    # ★ 签名 JWT（HS256）。身份写在令牌声明里，服务端不存会话 → 可水平扩容、重启不掉登录态。
+    #   生产必须注入 ≥32 字节随机值（下面留空 = 启动时生成临时密钥并告警，重启后旧令牌失效）。
+    #   生成示例：openssl rand -base64 48
+    jwt-secret: ${MEDICAL_AUTH_JWT_SECRET:}
+    # 令牌有效期（秒），默认 1 小时。上线前按医院安全策略调整。
+    jwt-ttl-seconds: ${MEDICAL_AUTH_JWT_TTL:3600}
+    jwt-issuer: ${MEDICAL_AUTH_JWT_ISSUER:pasm-medical}
 
   # 每次认知调用都要留痕：入参快照 / 召回条目 / 模型版本 / 操作者 / 时间。
   # 生产建议落到**独立库**且只授予 INSERT（append-only），与业务库物理隔离。

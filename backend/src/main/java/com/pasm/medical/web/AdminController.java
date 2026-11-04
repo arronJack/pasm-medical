@@ -11,12 +11,16 @@ import com.pasm.medical.repository.EncounterRepository;
 import com.pasm.medical.repository.PatientRepository;
 import com.pasm.medical.service.AuditService;
 import com.pasm.medical.service.SystemConfigService;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
@@ -103,7 +107,15 @@ public class AdminController {
     }
 
     /**
-     * 审计（只增不改）：最近 200 条。
+     * 审计（只增不改）：**分页**读取，默认每页 200 条。
+     *
+     * <p>★ <b>为什么必须分页</b>：旧实现固定返回"最近 200 条"，超过 200 条之后更早的审计
+     * 在界面上**看不到也翻不到** —— 对"只增不改"的合规库来说，这等于静默丢历史。
+     * 更隐蔽的是：它不报错，只是让人以为"更早没有记录"。
+     *
+     * <p>分页参数：{@code page} 从 0 开始，{@code size} 上限 {@value #AUDIT_MAX_PAGE_SIZE}
+     * （防止一次拉全库把服务打爆）。总数通过响应头 {@code X-Total-Count} 返回，
+     * 响应体仍是**数组**（保持与既有前端 / e2e 断言的兼容）。
      *
      * <p>★ 必须把 {@code inputSnapshot} 也返回：问诊的问题原文就存在这里
      * （{@code AssistController} 写的是 {@code question=…}）。以前接口不返回这个字段，
@@ -112,27 +124,32 @@ public class AdminController {
      * <p>快照可能是整段配置或整句提问，统一截到 {@value #SNAPSHOT_LIMIT} 字再下发，
      * 避免一条记录把整个列表撑大；截断会加省略号，不假装是全文。
      *
-     * <p>★ 范围：超管 = 全院最近 200 条；医护/科室管理员 = **本科室患者**相关的记录。
+     * <p>★ 范围：超管 = 全院；医护/科室管理员 = **本科室患者**相关的记录。
      * 因此登录/登出/改配置这类没有 {@code patientRef} 的事件对科室角色不可见 ——
      * 它们不属于"本科室患者数据"，要看它们请用超管账号。
      */
     @GetMapping("/audit")
-    public ResponseEntity<List<Map<String, Object>>> audit() {
+    public ResponseEntity<List<Map<String, Object>>> audit(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "200") int size) {
         ZoneId z = ZoneId.systemDefault();
-        // ★ 在**数据库**里筛，不要"取最近 200 条再在内存里过滤"：
-        //   本科室事件不落在那 200 条里时，界面会静默变空
+        int p = Math.max(0, page);
+        int s = Math.min(Math.max(1, size), AUDIT_MAX_PAGE_SIZE);
+        Pageable pr = PageRequest.of(p, s);
+        // ★ 在**数据库**里筛 + 分页，不要"取一批再在内存里过滤"：
+        //   本科室事件不落在当前页里时，界面会静默变空
         String dept = IdentityContext.scopeDepartment();
-        List<AiAudit> rows;
+        Page<AiAudit> pg;
         if (dept == null) {
-            rows = audits.findTop200ByOrderByOccurredAtDesc();
+            pg = audits.findAllByOrderByOccurredAtDesc(pr);
         } else {
             List<String> inScope = encounters.patientRefsInDepartment(dept);
             // ★ 本科室没有患者时返回空，**不能**退化成"查全部" —— 那是把越权包装成正常返回
-            rows = inScope.isEmpty()
-                    ? List.of()
-                    : audits.findTop200ByPatientRefInOrderByOccurredAtDesc(inScope);
+            pg = inScope.isEmpty()
+                    ? Page.empty(pr)
+                    : audits.findByPatientRefInOrderByOccurredAtDesc(inScope, pr);
         }
-        var out = rows.stream().map(a -> {
+        var out = pg.getContent().stream().map(a -> {
             Map<String, Object> m = new java.util.LinkedHashMap<>();
             // id 给前端当列表 key —— 用「时间+动作」当 key 在同一分钟内必然撞车（读审计尤其频繁）
             m.put("id", a.getId());
@@ -149,8 +166,16 @@ public class AdminController {
             m.put("inputTruncated", cut);
             return m;
         }).toList();
-        return ResponseEntity.ok(out);
+        // ★ 响应体保持数组（兼容既有前端与 e2e 断言），总数走响应头
+        return ResponseEntity.ok()
+                .header("X-Total-Count", String.valueOf(pg.getTotalElements()))
+                .header("X-Page", String.valueOf(p))
+                .header("X-Page-Size", String.valueOf(s))
+                .body(out);
     }
+
+    /** 审计单页上限：防止一次拉全库把服务打爆。 */
+    private static final int AUDIT_MAX_PAGE_SIZE = 500;
 
     /** 审计快照下发时的截断长度。 */
     private static final int SNAPSHOT_LIMIT = 300;

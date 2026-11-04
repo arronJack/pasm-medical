@@ -5,8 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.security.SecureRandom;
-import java.util.Base64;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,10 +13,13 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 开发期的令牌服务。
  *
- * <p>⚠️ <b>仅骨架</b>：令牌存在内存里，重启即失效；账号是写死的演示账号。
- * 生产必须换成：医院统一身份（OIDC/OAuth2）或签名 JWT，并带过期与刷新。
- * 这里保留是因为「没有登录就进不去」这条约束本身要在代码里成立 ——
- * 至于用什么身份源，是接入时替换的实现细节。
+ * <p>★ <b>令牌形态：签名 JWT（HS256，见 {@link JwtService}）</b>。身份直接写在令牌声明里，
+ * 服务端不再维护"令牌 → 身份"的内存映射 —— 重启、多实例部署都不会把已登录用户踢下线。
+ * 登出通过一张**撤销表**（token → 过期时间）实现，过期项会被顺带清理。
+ *
+ * <p>⚠️ <b>账号源仍是写死的演示账号</b>（且默认关闭）。生产必须接入医院统一身份
+ * （OIDC/OAuth2）：把外部 IdP 返回的声明映射成 {@link Identity} 后，同样交给
+ * {@link JwtService#issue} 签发即可 —— 下游 {@link IdentityContext} / 各 Controller 一行不用改。
  *
  * <p>★ <b>演示账号默认关闭</b>（{@code medical.auth.demo-login-enabled}）。
  * 只有 {@code dev} 档显式打开（见 {@code application-dev.yml}）。为什么不是"默认开着、
@@ -36,8 +38,6 @@ public class TokenService {
 
     private static final Logger log = LoggerFactory.getLogger(TokenService.class);
 
-    private static final SecureRandom RND = new SecureRandom();
-
     /**
      * 演示账号（**仅演示开关打开时可用**）。
      *
@@ -54,14 +54,23 @@ public class TokenService {
      */
     private static final Map<String, DemoAccount> DEMO_USERS = buildDemoUsers();
 
-    /** token → 身份 */
-    private final Map<String, Identity> sessions = new ConcurrentHashMap<>();
+    /**
+     * 登出撤销表：token → 过期时间（epoch 秒）。
+     *
+     * <p>★ JWT 本身是无状态的，签出去就"有效到过期"。要让登出**立即生效**，
+     * 就需要一张撤销表。它只在用户主动登出时增长，且过期项会在下次操作时清理 ——
+     * 规模远小于"所有在线会话"。
+     */
+    private final Map<String, Long> revoked = new ConcurrentHashMap<>();
 
+    private final JwtService jwt;
     private final boolean demoLoginEnabled;
 
     public TokenService(
-            @Value("${medical.auth.demo-login-enabled:false}") boolean demoLoginEnabled) {
+            @Value("${medical.auth.demo-login-enabled:false}") boolean demoLoginEnabled,
+            JwtService jwt) {
         this.demoLoginEnabled = demoLoginEnabled;
+        this.jwt = jwt;
         if (demoLoginEnabled) {
             log.warn("⚠ 演示账号已启用（{}，密码写死）—— 只允许在 dev 档使用；"
                             + "生产必须改接医院统一身份（OIDC/OAuth2 或签名 JWT）",
@@ -108,23 +117,49 @@ public class TokenService {
         if (u == null || !u.password().equals(password)) {
             return null;
         }
-        byte[] buf = new byte[24];
-        RND.nextBytes(buf);
-        String token = Base64.getUrlEncoder().withoutPadding().encodeToString(buf);
         Identity id = new Identity(username, u.role(), u.department(), u.staffId(),
                 u.patientRef(), u.displayName());
-        sessions.put(token, id);
-        return new LoginResult(token, id);
+        // ★ 身份写进令牌声明：服务端不再存会话，重启/多实例都不会掉登录态
+        return new LoginResult(jwt.issue(id), id);
     }
 
-    /** 校验令牌，返回身份；无效则 null。 */
+    /** 校验令牌，返回身份；无效 / 过期 / 已撤销 一律返回 null（调用方统一按 401 处理）。 */
     public Identity verify(String token) {
-        return token == null ? null : sessions.get(token);
+        if (token == null) {
+            return null;
+        }
+        purgeRevoked();
+        if (revoked.containsKey(token)) {
+            return null;
+        }
+        JwtService.Parsed p = jwt.parse(token);
+        return p == null ? null : p.identity();
     }
 
+    /**
+     * 登出：把令牌放进撤销表，等它自然过期后清理。
+     *
+     * <p>★ 为什么不是"删会话"：JWT 是无状态的，服务端根本没有会话可删。
+     * 撤销表是让"登出立即生效"的最小代价方案（只记录主动登出的令牌，不是所有在线会话）。
+     */
     public void logout(String token) {
-        if (token != null) {
-            sessions.remove(token);
+        if (token == null || token.isBlank()) {
+            return;
         }
+        JwtService.Parsed p = jwt.parse(token);
+        long exp = p == null ? 0L : p.expiresAtEpochSec();
+        if (exp > Instant.now().getEpochSecond()) {
+            revoked.put(token, exp);
+        }
+        purgeRevoked();
+    }
+
+    /** 清理已过期的撤销项 —— 不加这一步，撤销表会随登出次数无限增长。 */
+    private void purgeRevoked() {
+        if (revoked.size() < 256) {
+            return;
+        }
+        long now = Instant.now().getEpochSecond();
+        revoked.entrySet().removeIf(e -> e.getValue() == null || e.getValue() <= now);
     }
 }

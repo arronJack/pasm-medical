@@ -322,8 +322,38 @@ public class MedicalProxyController {
                 a.setEvidenceCount(r.path("items").size());
             }
         }
-        a.setInputSnapshot("path=" + path);
+        // ★ 保留患者**原始输入**，使审计面板能查到「当时问了什么」，而不是只有一行路径
+        //   —— 否则审计沦为摆设，与 README「问题原文随 input_snapshot 落库可查」及 PLAN §13 不符
+        a.setInputSnapshot(inputSnapshotOf(path, body));
         try { audit.record(a); } catch (Exception ignored) { }
+    }
+
+    /**
+     * 从转发体里抽取患者原始输入，构造审计快照。
+     *
+     * <p>★ 以前这里只有 {@code "path=" + path}，审计面板的「输入快照」列常年是
+     *   {@code path=/api/consult/answer} 这种没信息量的字符串 —— 「患者当时说了什么」查不出来。
+     *   现在按端点抽取真正的输入文本：问诊主诉 / 回答 / 检验单引用 / 确认的报告键。
+     *   这些字段是前端 {@code api.ts} 实际发出的（chiefComplaint / value / imageUrl / reportKey），
+     *   与 Python 侧 {@code service.py} 接收的字段一致。
+     */
+    private String inputSnapshotOf(String path, Map<String, Object> body) {
+        if (body != null) {
+            String input = switch (path) {
+                case "/api/consult/start"  -> str(body, "chiefComplaint");
+                case "/api/consult/answer" -> str(body, "value");
+                case "/api/critical-fact"  -> str(body, "value");
+                case "/api/lab/parse"      -> str(body, "imageUrl");
+                default                    -> null;
+            };
+            if (input != null && !input.isBlank()) {
+                return "path=" + path + ";input=" + input;
+            }
+            if (path.endsWith("/lab/confirm")) {
+                return "path=" + path + ";reportKey=" + str(body, "reportKey");
+            }
+        }
+        return "path=" + path;
     }
 
     private String actionOf(String path, JsonNode r) {

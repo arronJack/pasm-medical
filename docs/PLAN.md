@@ -2,6 +2,29 @@
 
 > 版本：v0.1（2026-09-21），实现进度更新于 2026-09-22
 
+---
+
+## ⚠️ 阅读须知：本文是「设计目标 + 路线图」，不是当前已实现状态
+
+- 当前已落地的是 **MVP**（验证过、能跑），真实能力见 [README「现状与后续」](README.md#现状与后续)。
+- 设计稿中的 **PostgreSQL / pgvector / MinIO / Redis / FHIR / SSE 流式 / 自学习闭环 / LIS-HL7 适配器** 在 MVP 中**尚未落地** —— 属于目标，不是现状。
+  认知服务的**跨请求会话**已抽出可插拔 `SessionStore`（默认 memory / CLI 默认 file），
+  单机多 worker 与重启不再丢会话；**多主机**水平扩容仍需接 Redis/DB 实现（协议已就位）。
+- 下文凡标注「（目标）」的，均为 MVP 暂未落地的设计。
+
+| 维度 | PLAN 设计目标 | 当前 MVP 实际（2026-11-04） |
+|---|---|---|
+| 语言 / JDK | Java 21 | Java 17（JPA，非 MyBatis-Plus） |
+| 数据库 | PostgreSQL + pgvector | H2 内存（dev）；可切 PG 但**无迁移脚本** |
+| 缓存 / 对象存储 | Redis + MinIO | 无（会话状态走 `SessionStore`：memory / file；认知记忆按 agent 落盘） |
+| 数据标准 | FHIR | 自造 JPA schema；仅 `Encounter` 保留最小 FHIR 投影 |
+| 认知服务 | 无状态、可水平扩容 | 跨请求会话已抽出 `SessionStore`（file 存储：单机多 worker / 重启不丢）；多主机需接 Redis/DB |
+| 前端流式 | SSE | 非流式（一次性响应） |
+| 自学习闭环 | 每日批处理 + 候选池 + 审核台 | 仅分诊候选排序后验（P0.5） |
+| 工程结构 | 多模块（domain/service/cognition…） | 单模块 `backend/src/main/java/com/pasm/medical` + `web/` + `pasm_medical/` |
+
+---
+
 ### ★ 实现进度（2026-09-22）
 
 原方案 §0.4 建议"给 pasm-framework 补一组认知 HTTP API"，实际落地时改用了
@@ -394,6 +417,8 @@ pasm-medical/
 └─ docs/                        # 合规材料、术语表、方案
 ```
 
+> 上表为**目标目录结构**；MVP 实际为单模块 `backend/src/main/java/com/pasm/medical` + `web/` + `pasm_medical/`（见文首对照表）。
+
 ---
 
 ## 13. 验收标准（医学项目跟普通项目不一样）
@@ -406,6 +431,7 @@ pasm-medical/
    （这是 PASM 自己的方法论，直接沿用）
 4. **患者隔离测试**：造两个患者，断言 A 的召回里 0 条来自 B
 5. **审计完整性**：断言每条 AI 输出都能追到「输入快照 + 召回条目 + 模型版本」
+   > MVP 部分满足：已落 `input_snapshot`（含患者原始输入）+ 操作者 + 模型版本 + 证据条数；但「召回条目逐条 source」尚未入审计（缺口见 §3.1 记忆路由落审计）。
 6. **压力**：并发问诊 + 流式响应下的时延分布
 
 ---

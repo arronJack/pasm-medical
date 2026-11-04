@@ -20,13 +20,15 @@
 from __future__ import annotations
 
 import os
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from . import safety
 from . import lab
+from . import store as session_store
 from .consult import ConsultEngine, ConsultSession
-from .lab import LabReport, OcrEngine
+from .lab import LabItem, LabReport, OcrEngine
 from .domain import (Encounter, agent_id_for, allergy_memory, critical_memory,
                      scrub_identifiers)
 from .learning import MedicalPosterior, ACTION_PREFIXES
@@ -113,16 +115,17 @@ class MedicalService:
 
     def __init__(self, app: Any, *, tenant: str,
                  consult_engine: Optional[ConsultEngine] = None,
-                 posterior: Optional[MedicalPosterior] = None) -> None:
+                 posterior: Optional[MedicalPosterior] = None,
+                 store: Optional[session_store.SessionStore] = None) -> None:
         self.app = app
         self.tenant = tenant
         self.engine = consult_engine or ConsultEngine()
         #: ★ 医学动作后验（P0.5）—— 只在内存里跑也行（测试），生产由 build_service 落盘。
         self.posterior = posterior or MedicalPosterior()
-        #: ★ 进行中的问诊（进程内）。生产须落 Redis/DB —— 多实例下进程内状态会丢。
-        self._consults: Dict[str, ConsultSession] = {}
-        #: 待确认的检验单：report_key → (patient_ref, LabReport)
-        self._lab_reports: Dict[str, Any] = {}
+        #: ★ 跨请求状态的存储（问诊会话 / 待确认检验单）。
+        #:   默认 memory（零依赖），生产由 build_service / CLI 按配置换成 file（可重启不丢）。
+        #:   多主机部署请实现同一协议的 Redis/DB 版本（见 :mod:`.store`）。
+        self._store: session_store.SessionStore = store or session_store.MemorySessionStore()
         #: OCR 引擎（不配置时检验单功能不可用，但服务照常启动）
         self.ocr: Optional[Any] = None
 
@@ -145,6 +148,81 @@ class MedicalService:
         gw = pm.get("web_gateway") if pm is not None else None
         api = getattr(gw, "cognitive", None) if gw is not None else None
         return getattr(api, "capabilities", None) if api is not None else None
+
+    # ---------------------------------------------------------- 跨请求状态（存储抽象）
+    #
+    # ★ 问诊会话 / 待确认检验单以前是进程内 dict。现在统一走 SessionStore：
+    #   单实例用 memory；多 worker / 需要重启不丢用 file（见 .store）。
+    #   这里负责「对象 ↔ JSON」转换，业务代码不再直接碰字典
+    #   —— 否则"哪些是跨请求状态"会散落在各处，想换存储就得全仓搜。
+
+    @staticmethod
+    def _consult_to_dict(s: "ConsultSession") -> Dict[str, Any]:
+        """会话 → 可 JSON 序列化的快照。
+
+        ★ 只存**状态**，不存 engine：引擎是共享且无状态的，恢复时用当前 engine
+          重新装配即可，避免把整个问诊树反复写进存储。
+        """
+        return {
+            "patient_ref": s.patient_ref,
+            "chief_complaint": s.chief_complaint,
+            "facts": dict(s.facts),
+            "answered": list(s.answered),
+            "halted": bool(s.halted),
+            "red_flags_hit": list(s.red_flags_hit),
+        }
+
+    def _consult_from_dict(self, d: Dict[str, Any]) -> "ConsultSession":
+        s = ConsultSession(self.engine,
+                           chief_complaint=d.get("chief_complaint"),
+                           patient_ref=d.get("patient_ref") or "")
+        s.facts = dict(d.get("facts") or {})
+        s.answered = list(d.get("answered") or [])
+        s.halted = bool(d.get("halted"))
+        s.red_flags_hit = list(d.get("red_flags_hit") or [])
+        # 用已采集的 facts 重建待问队列（_build 会过滤掉已答项）
+        s._build()
+        if s.halted:
+            s._pending = []          # 与原语义一致：红旗中断后不再追问
+        return s
+
+    def _get_consult(self, key: str) -> Optional["ConsultSession"]:
+        d = self._store.get(key)
+        return self._consult_from_dict(d) if isinstance(d, dict) else None
+
+    def _put_consult(self, key: str, s: "ConsultSession") -> None:
+        self._store.put(key, self._consult_to_dict(s))
+
+    def _pop_consult(self, key: str) -> Optional["ConsultSession"]:
+        d = self._store.pop(key)
+        return self._consult_from_dict(d) if isinstance(d, dict) else None
+
+    @staticmethod
+    def _lab_to_dict(patient_ref: str, rep: "LabReport") -> Dict[str, Any]:
+        return {"patient_ref": patient_ref,
+                "report": {"items": [asdict(i) for i in rep.items],
+                           "source": rep.source,
+                           "engine": rep.engine,
+                           "unparsed_rows": list(rep.unparsed_rows)}}
+
+    @staticmethod
+    def _lab_from_dict(d: Dict[str, Any]) -> Any:
+        rd = d.get("report") or {}
+        rep = LabReport(
+            items=[LabItem(**x) for x in (rd.get("items") or [])
+                   if isinstance(x, dict)],
+            source=rd.get("source") or "",
+            engine=rd.get("engine") or "",
+            unparsed_rows=list(rd.get("unparsed_rows") or []),
+        )
+        return (d.get("patient_ref") or "", rep)
+
+    def _get_lab(self, key: str) -> Any:
+        d = self._store.get(key)
+        return self._lab_from_dict(d) if isinstance(d, dict) else None
+
+    def _put_lab(self, key: str, patient_ref: str, rep: "LabReport") -> None:
+        self._store.put(key, self._lab_to_dict(patient_ref, rep))
 
     # ---------------------------------------------------------- 写入
 
@@ -394,7 +472,7 @@ class MedicalService:
         rows = eng.rows(image_path)
         rep = lab.parse_rows(rows, engine=eng.name, source=source or image_path)
         key = "%s:lab" % patient_ref
-        self._lab_reports[key] = (patient_ref, rep)
+        self._put_lab(key, patient_ref, rep)
         d = rep.to_dict()
         d.update({"ok": True, "report_key": key})
         return d
@@ -404,7 +482,7 @@ class MedicalService:
         """直接吃结构化行（LIS 直连 或 人工录入 走这条，绕开 OCR）。"""
         rep = lab.parse_rows(rows, engine=engine, source=source)
         key = "%s:lab" % patient_ref
-        self._lab_reports[key] = (patient_ref, rep)
+        self._put_lab(key, patient_ref, rep)
         d = rep.to_dict()
         d.update({"ok": True, "report_key": key})
         return d
@@ -413,11 +491,13 @@ class MedicalService:
                     corrections: Optional[Dict[str, float]] = None,
                     all_items: bool = False) -> Dict[str, Any]:
         """回显确认 —— **确认之后才允许入记忆**。"""
-        got = self._lab_reports.get(report_key)
+        got = self._get_lab(report_key)
         if got is None:
             return {"ok": False, "error": "找不到该检验单，请先识别"}
         patient_ref, rep = got
         r = rep.confirm(corrections, all_items=all_items)
+        # ★ 同上：反序列化出来的 rep 是副本，确认状态要写回去（否则重复确认时又变回"未确认"）
+        self._put_lab(report_key, patient_ref, rep)
         mems = rep.to_memories()
         written = 0
         for m in mems:
@@ -451,8 +531,9 @@ class MedicalService:
                       session_key: str = "") -> Dict[str, Any]:
         """开一次预问诊。返回首个问题（或红十字直接建议就医）。
 
-        ★ 问诊状态**进程内保存**（``self._consults``）—— 这是 P1 的第一版。
-        生产必须落到 Redis/DB：多实例部署下进程内状态会丢，患者刷新就断线。
+        ★ 问诊状态走 :class:`SessionStore`（默认 memory；CLI 默认 file）——
+        不再绑死在进程内：file 存储下重启不丢、单机多 worker 可共享；
+        多主机部署请实现同一协议的 Redis/DB 版本（见 :mod:`.store`）。
         """
         key = self._session_key(patient_ref, session_key)
         if not key:
@@ -463,7 +544,7 @@ class MedicalService:
             r = s.set_chief_complaint(chief_complaint)
             if not r.get("ok"):
                 return r                       # 识别不出 → 让前端出主诉选择
-        self._consults[key] = s
+        self._put_consult(key, s)
         return self._consult_state(s)
 
     def answer_consult(self, text_or_key: str, value: str = "",
@@ -478,7 +559,7 @@ class MedicalService:
         if not key:
             return {"ok": False,
                     "error": "缺少 patient_ref：无法确定这是谁的问诊会话"}
-        s = self._consults.get(key)
+        s = self._get_consult(key)
         if s is None:
             return {"ok": False,
                     "error": "没有进行中的问诊（或该会话不属于此患者），"
@@ -487,6 +568,9 @@ class MedicalService:
             r = s.answer(text_or_key, value)
         else:
             r = s.answer_current(text_or_key)
+        # ★ 必须回写：存储 `get` 出来的是**反序列化后的新对象**，改它不会自动同步。
+        #   （以前是进程内 dict 的引用，改了就是改了 —— 换成可插拔存储后这一步不能省。）
+        self._put_consult(key, s)
         out = self._consult_state(s)
         out["answer_result"] = r
         # ★ 主诉与红旗事件写入认知记忆：复诊时不必重问（这就是记忆的价值）
@@ -500,7 +584,7 @@ class MedicalService:
     def finish_consult(self, session_key: str, patient_ref: str = "") -> Dict[str, Any]:
         """结束问诊，产出《预问诊摘要》并写入认知记忆。"""
         key = self._session_key(patient_ref, session_key)
-        s = self._consults.get(key) if key else None
+        s = self._get_consult(key) if key else None
         if s is None:
             return {"ok": False, "error": "没有进行中的问诊"}
         sm = s.summary()
@@ -511,7 +595,7 @@ class MedicalService:
             self.observe_note(s.patient_ref, "预问诊·%s" % s.chief_complaint,
                               "；".join("%s：%s" % (k, v)
                                         for k, v in list(s.facts.items())[:8]), 4)
-        self._consults.pop(key, None)
+        self._pop_consult(key)
         return {"ok": True, **sm}
 
     def _consult_state(self, s: "ConsultSession") -> Dict[str, Any]:
@@ -668,6 +752,9 @@ class MedicalService:
             "cognitive_error": err,
             "operations": (caps.operations() if caps is not None else []),
             "rules": safety.table_meta(),
+            # ★ 把存储形态暴露出来：运维要能一眼确认"我现在到底是 memory 还是 file"，
+            #   否则"以为多实例共享、实际各自持有一份"这种事故根本发现不了。
+            "session_store": self._store.stats(),
             "note": ("requires_physician_confirmation 恒为 True；"
                      "本服务不产出处方，只做核对与依据呈现。"),
         }
@@ -821,7 +908,8 @@ def register_medical_routes(svc: "MedicalService") -> int:
 
 def build_service(*, tenant: str, kb_dir: str, persist_dir: str,
                   host: str = "127.0.0.1", port: int = 0,
-                  token: str = "", workspace: Optional[str] = None) -> MedicalService:
+                  token: str = "", workspace: Optional[str] = None,
+                  store: Optional[session_store.SessionStore] = None) -> MedicalService:
     """装配一个租户的医疗认知服务并绑好 HTTP 网关。
 
     ``token`` 是**管理令牌** —— 认知接口（写记忆、改人格）与资料库管理都要它。
@@ -855,7 +943,7 @@ def build_service(*, tenant: str, kb_dir: str, persist_dir: str,
             }},
         },
     )
-    svc = MedicalService(app, tenant=tenant, posterior=posterior)
+    svc = MedicalService(app, tenant=tenant, posterior=posterior, store=store)
     register_medical_routes(svc)          # ★ 把医疗接口挂到网关
     return svc
 
@@ -872,6 +960,15 @@ def main() -> int:                                          # pragma: no cover
     ap.add_argument("--token", default=os.environ.get("PASM_MEDICAL_TOKEN", ""))
     ap.add_argument("--dir", default=os.path.join(os.path.expanduser("~"),
                                                   ".pasm-medical"))
+    # ★ 默认 file：CLI 起的是"真服务"，重启丢会话是实打实的故障。
+    #   memory 仍保留给临时联调 / 单次演示（不落盘、退出即清）。
+    ap.add_argument("--session-store",
+                    default=os.environ.get("PASM_MEDICAL_SESSION_STORE", "file"),
+                    choices=["memory", "file"],
+                    help="跨请求状态存储：file（默认，重启不丢）/ memory（进程内）")
+    ap.add_argument("--session-dir",
+                    default=os.environ.get("PASM_MEDICAL_SESSION_DIR", ""),
+                    help="file 存储目录；默认 <--dir>/sessions")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
@@ -880,9 +977,11 @@ def main() -> int:                                          # pragma: no cover
         from . import domain
         return 0 if (domain.selftest() and safety.selftest()) else 1
 
+    session_dir = a.session_dir or os.path.join(a.dir, "sessions")
+    store = session_store.build_store(kind=a.session_store, root=session_dir)
     svc = build_service(tenant=a.tenant, kb_dir=os.path.join(a.dir, "kb"),
                         persist_dir=os.path.join(a.dir, "persist"),
-                        host=a.host, port=a.port, token=a.token)
+                        host=a.host, port=a.port, token=a.token, store=store)
     print(json.dumps(svc.health(), ensure_ascii=False, indent=2))
     print("\n认知接口前缀：/api/cog/  （详见 pasm-framework 的 web_gateway 文档）")
     print("医疗接口：/api/consult/*、/api/lab/*、/api/encounters、/api/config（需管理令牌）")

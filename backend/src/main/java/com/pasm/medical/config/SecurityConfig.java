@@ -91,6 +91,13 @@ public class SecurityConfig {
                     .hasAnyRole("DOCTOR", "DEPT_ADMIN", "SUPER_ADMIN")
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().authenticated())
+            // ★ 401 与 403 必须分开：
+            //   未认证（没令牌 / 令牌无效 / 已过期 / 已登出）→ 401，前端据此清令牌回登录页；
+            //   已认证但角色不够 → 403，前端提示"没有权限"。
+            //   两者都塌成 403 时，前端会把"登录已失效"误报成"越权"，排查方向直接跑偏。
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint((req, res, e) -> res.sendError(401))
+                .accessDeniedHandler((req, res, e) -> res.sendError(403)))
             .addFilterBefore(new TokenAuthFilter(tokens),
                              UsernamePasswordAuthenticationFilter.class);
         return http.build();
