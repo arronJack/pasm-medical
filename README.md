@@ -150,9 +150,9 @@ cd web && npm install && npm run dev       # http://127.0.0.1:5173
 ```bash
 python -m pasm_medical.domain            # 领域模型（隔离规则 / 去标识）
 python -m pasm_medical.safety            # 护栏（红线）
-python -m pasm_medical.mcp.server --selftest   # MCP sidecar，24 项
-python tools/e2e_medical_service.py      # 真起 HTTP 服务，17 项
-python tools/e2e_stack.py                # 三端联调，67 项（四角色全覆盖，需先 mvn package）
+python -m pasm_medical.mcp.server --selftest   # MCP sidecar，23 项
+python tools/e2e_medical_service.py      # 真起 HTTP 服务，19 项
+python tools/e2e_stack.py                # 三端联调，81 项（四角色全覆盖 + 7 项真实链路落库回归，需先 mvn package）
 python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被抓到
 python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约 + 真跑 --check
 ```
@@ -165,7 +165,7 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 | **检验单解析（`lab.py`）** | ✅ 已实现并验证（24 项）：OCR→结构化→规则判读→**回显确认**；未确认不得入记忆 |
 | **LLM 网关（`llm.py`）** | ✅ 已实现并验证（11 项）：本地 Ollama / OpenAI 兼容 API / **无 LLM 降级**三档 |
 | 领域与安全（`domain.py` / `safety.py`） | ✅ 已实现并验证（14 + 16 项） |
-| 认知服务与患者隔离 | ✅ 已实现并验证（端到端 17 项 + 反例对照 5 项） |
+| 认知服务与患者隔离 | ✅ 已实现并验证（端到端 19 项 + 反例对照 5 项） |
 | **前端（`web/`）** | ✅ **构建通过**（vue-tsc 类型检查 + vite）；登录页 / 三栏工作台 / 医护后台，全部接通真实后端 |
 | **Spring Boot 业务层** | ✅ **编译 + 启动 + 三端联调通过**（JDK 18 / Maven 3.8.6）；登录鉴权（默认关闭演示账号）/ 薄转发 / 认知客户端；**JPA 持久化**（患者 / 就诊 / 审计 / 对接设置）+ 管理接口 `/api/admin/*`、`/api/patient/*` |
 | **授权与越权防护** | ✅ **两层判定**：URL 级（后台只给医护侧；改配置**仅超管**、资料库按科室授权）+ **资源级**（`ref` 按身份收窄 —— 患者换 `ref` 读他人档案 / 就诊 / 发起问诊全部 **403**；资料库写/停用/删除按资料科室收窄 —— 科室管理员动跨科室/全院通用资料 **403**）；就诊详情**归属校验**（挡 IDOR）；对接设置**服务端白名单校验** |
@@ -180,7 +180,7 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 | 影像归档 | 未开始（P5，**只做归档与转交，不做分析**） |
 | 中医知识库 | 未开始（见 `docs/PLAN.md` §6） |
 
-**已验证的规模**：模块自检 **88 项** + MCP selftest **24 项** + 认知端到端 **17 项** + 学习端到端 **14 项**（P0.5）+ 反例对照 **5 项** + 学习反例对照 **2 项**（P0.5）+ 三端联调 **81 项**（四角色全覆盖，全部通过）+ HL7 解析 **10 项** + LIS/FHIR 真库集成 **9 项** + 自学习审核台真库集成 **5 项** + **真实就诊数据自学习评测 71 项**（`tools/eval_real_learning.py`，`MEDICAL_LEARNING_AUTO=true`，报告见 [`docs/REAL-LEARNING-EVAL.md`](docs/REAL-LEARNING-EVAL.md)）。
+**已验证的规模（2026-11-05 实测）**：`run_checks.py --web --java` **14 项套件全绿** —— 模块自检 **97 项**（14+16+24+23+11+9）+ 认知端到端 **19 项** + 学习端到端 **14 项** + 反例对照 **5 处 / 学习反例 2 处**（故意改坏必须被抓到）+ 三端联调 **81 项** + MCP selftest **23 项** + 前端 `vue-tsc` / `vite` 构建 0 错误 + 后端真 PostgreSQL 测试 **26 项**（迁移 1 + 整应用 1 + 候选审核台 5 + LIS 集成 9 + HL7 解析 10）。另有**独立验证资产**（未编进 `run_checks.py`）：MCP stdio e2e **15 项**、分发形态冒烟 **9 项**（发 PyPI 前必跑，本轮未跑）、**真实就诊数据自学习评测 71 项**（`tools/eval_real_learning.py`，报告见 [`docs/REAL-LEARNING-EVAL.md`](docs/REAL-LEARNING-EVAL.md)）。
 
 > **启动、部署、配置、排障**见 [`docs/GUIDE.md`](docs/GUIDE.md)；
 > **功能说明**（每个功能在做什么、边界在哪）也在同一份文档里。
@@ -190,6 +190,10 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 
 **完整的开发方案**（合规红线、数据模型、自学习闭环、验收标准、分期路线图）
 见 [`docs/PLAN.md`](docs/PLAN.md)。
+
+**版本对比与分享材料**：[`docs/V1-VS-NOW.md`](docs/V1-VS-NOW.md)（第一版 → 当前版更新清单）、
+[`docs/SHARE-CSDN.md`](docs/SHARE-CSDN.md)（CSDN 技术长文）、
+[`docs/SHARE-WECHAT.md`](docs/SHARE-WECHAT.md)（公众号图文）。
 
 **"这些功能到底能不能做出来"** —— 逐项可行性判定（能做 / 要设边界 / 不建议自研）、
 检验单解析的安全设计、智能追问引擎的做法、完整站点结构（登录 / 患者端三栏 / 医护后台）

@@ -418,7 +418,7 @@ public class KbCandidateService {
     private static String fingerprintOf(String title, String content) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            String s = normalize(title) + " " + normalize(content);
+            String s = normalize(title) + "\0" + normalize(content);
             byte[] h = md.digest(s.getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
             for (byte b : h) {

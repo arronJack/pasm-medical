@@ -41,7 +41,7 @@
 | 前端 | `web/` | Vue 3 + TS + Vite | ✅ 三栏工作台 + 医护后台，**全部接通真实后端**（构建通过） |
 | 业务层 | `backend/` | Spring Boot 3 / Java 17 | ✅ 已编译、已启动、三端联调全过；JPA 持久化（患者/就诊/审计）+ 真实管理接口 |
 | 认知服务 | `pasm_medical/` | Python ≥3.9，零第三方依赖 | ✅ 已实现并端到端验证 |
-| MCP sidecar | `pasm_medical/mcp/` | Python 零依赖 stdio | ✅ 已建并验证（selftest 19 项 + e2e 15 项） |
+| MCP sidecar | `pasm_medical/mcp/` | Python 零依赖 stdio | ✅ 已建并验证（selftest 23 项 + e2e 15 项） |
 
 ---
 
@@ -480,7 +480,7 @@ python tools/e2e_stack.py
 **业务层持久化**（患者档案 / 历史就诊 / 后台患者列表 / 统计 / 审计）→
 **就诊结构化详情 + 归属校验** → **对接设置读写 / 对账 / 白名单校验** → **角色越权 403**。
 
-**67 项全过**代表三端真的接上了。其中 20 项是**反例**（故意构造的越权/非法输入）：
+**81 项全过**代表三端真的接上了。其中含**反例**（故意构造的越权/非法输入）：
 就诊归属不符必须 404（挡 IDOR）、非法枚举值必须 400、患者令牌访问后台必须 403、
 **患者换 `ref` 必须 403**、**别的患者回答同一会话必须查不到**、
 `demo-login-enabled=false` 时写死的账号必须登不进去、
@@ -612,20 +612,21 @@ CMD ["python", "-m", "pasm_medical.service", "--host", "0.0.0.0", "--port", "809
 ## 六、自检与验证
 
 ```bash
-# 模块自检（88 项）—— 零依赖，随时可跑
+# 模块自检（97 项）—— 零依赖，随时可跑
 python -m pasm_medical.domain      # 14 项：患者隔离规则、去标识
 python -m pasm_medical.safety      # 16 项：三条红线
 python -m pasm_medical.lab         # 24 项：检验单解析 + 确认闸门
 python -m pasm_medical.consult     # 23 项：问诊树 + 红旗中断
 python -m pasm_medical.llm         # 11 项：三档 LLM 网关
+python -m pasm_medical.store       # 9 项：会话存储（file / memory）
 
-# MCP sidecar 自检（24 项：协议 / 工具 / 患者隔离 / LLM 配置对账）
+# MCP sidecar 自检（23 项：协议 / 工具 / 患者隔离 / LLM 配置对账）
 python -m pasm_medical.mcp.server --selftest
 
-# 认知服务端到端（真起 HTTP，17 项）
+# 认知服务端到端（真起 HTTP，19 项）
 python tools/e2e_medical_service.py
 
-# ★ 三端联调（认知服务 + Spring Boot + 前端契约，67 项；含 20 项越权/非法输入反例）
+# ★ 三端联调（认知服务 + Spring Boot + 前端契约，81 项；含越权/非法输入反例 + 7 项真实链路落库回归）
 #   前置：cd backend && mvn -DskipTests package
 python tools/e2e_stack.py
 
@@ -684,8 +685,8 @@ Python 进程里，由 `PASM_MEDICAL_LLM*` 环境变量决定。两者不一致�
 
 | 项 | 状态 |
 |---|---|
-| Python 认知服务（问诊树 / 检验单 / 护栏 / 隔离） | ✅ 已实现并验证（88 + 17 + 5 项） |
-| MCP stdio sidecar（`pasm_medical/mcp/`） | ✅ 已建并验证（selftest 24 项 + 三端 e2e 67 项）；复用 `MedicalService` 门面，不启 HTTP 零端口污染 |
+| Python 认知服务（问诊树 / 检验单 / 护栏 / 隔离） | ✅ 已实现并验证（97 + 19 + 5 项） |
+| MCP stdio sidecar（`pasm_medical/mcp/`） | ✅ 已建并验证（selftest 23 项 + 三端 e2e 81 项）；复用 `MedicalService` 门面，不启 HTTP 零端口污染 |
 | Spring Boot 业务层 | ✅ 已编译、已启动、三端联调全过；JPA 持久化（患者 / 就诊 / 审计 / **对接设置**）+ 真实管理接口（`/api/admin/*`、`/api/patient`、`/api/patient/encounters`、`/api/patient/encounter/{id}`、`/api/admin/config`、`/api/auth/me`）；**后台限医护侧（配置仅超管、资料库按科室授权）+ 按身份收窄数据范围** |
 | 前端 | ✅ 三栏工作台 + 医护后台，**全部接通真实后端**（登录 / 问诊 / 检验单 / 反馈 / 患者档案 / 历史就诊详情 / 后台患者·统计·审计·对接设置），构建通过、零 TS 错误 |
 | 影像 | ❌ 不做分析，只归档 + 转交 |
