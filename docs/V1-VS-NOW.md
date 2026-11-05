@@ -1,7 +1,7 @@
 # 第一版 → 当前版：更新了哪些内容
 
-> 生成日期：2026-11-05 · 数据基线 HEAD：`c6ce22a`（其后仅含本文档自身的勘误提交）· 三端（Gitee / GitHub / GitCode）SHA 一致
-> 本文是**可核对的对比清单**，配套成稿见 [`SHARE-CSDN.md`](SHARE-CSDN.md) 与 [`SHARE-WECHAT.md`](SHARE-WECHAT.md)。
+> 生成日期：2026-11-05 · 数据基线 HEAD：`b363dec`（坐诊消息改 SSE 实时推送 + 补三处坐诊安全缺口；三端 SHA 一致可经 `git ls-remote` 核验）· 配套成稿见 [`SHARE-CSDN.md`](SHARE-CSDN.md) 与 [`SHARE-WECHAT.md`](SHARE-WECHAT.md)。
+> 注：本稿相对 `c6ce22a` 基线又新增 5 个提交（科室主数据 + 医护坐诊台 + AI 转人工全链路 + 对接设置收归超管 + SSE 实时推送），不只文档勘误。
 
 ## 0. 基线定义（先对齐口径，避免"第一版"各说各话）
 
@@ -9,8 +9,8 @@
 |---|---|
 | **第一版** | 2026-09-21 首个提交 `944e295`（`feat: 医院智能诊疗辅助系统`），同日 `docs/PLAN.md` 标注 `v0.1`，PyPI 侧对应 `pasm-medical 0.1.0` |
 | **第一版当时的自述** | README「现状与后续」原文：Spring Boot 业务层 = **骨架 + 认知客户端，未编译验证**；Vue 前端 = **骨架，未构建验证**；验证只有 **认知 e2e 17 项 + 反例对照**；中医知识库 / 多模态**未开始** |
-| **当前版** | 2026-11-05 基线 `c6ce22a`，`pyproject.toml` = **0.1.1**，截至基线共 **38 次提交**（9/21 共 9 次、9/22 共 14 次、9/23 共 6 次、11/04 共 5 次、11/05 共 4 次；其后仅文档勘误） |
-| 代码体量变化 | 首版 **18 个文件 / 2471 行新增** → 相对首版 `git diff --stat 944e295 HEAD` = **112 个文件变更 / +19825 行 / −294 行** |
+| **当前版** | 2026-11-05 HEAD `b363dec`，`pyproject.toml` = **0.1.1**，截至当前共 **43 次提交**（9/21 共 9 次、9/22 共 14 次、9/23 共 6 次、11/04 共 5 次、11/05 共 9 次） |
+| 代码体量变化 | 首版 **18 个文件 / 2471 行新增** → 相对首版 `git diff --stat 944e295 HEAD` = **129 个文件变更 / +22672 行 / −295 行**（相对 `c6ce22a` 基线再 +33 文件 / +2441 行，均为科室/坐诊/SSE 实功能） |
 | 许可与托管 | 首版即 MIT，现仍是 MIT；Gitee `arronzheng/pasm-medical`、GitHub `arronJack/pasm-medical`、GitCode `arronzheng/pasm-medical` 三端公开 |
 
 > 若首篇分享稿覆盖的是「方案设计 v0.1（`docs/PLAN.md`）」而不是仓库代码，对比仍然成立：那份 PLAN 的 P0/P1/P2/P3 分期正是本文第 2 节的对照轴。
@@ -23,13 +23,13 @@
 |---|---|---|
 | 定位 | 医生的副驾驶，不是 AI 医生；三条红线 | **没变**（不下诊断、不自动出处方、无依据必拒答）；红线由代码保证 |
 | 架构决策 | PLAN §0.4 计划「给 pasm-framework 补一组认知 HTTP API」 | **改成薄转发 + 复用门面**：Java 只做鉴权/校验/透传/留痕/落库，算法只留在 Python 侧一份；新增 MCP stdio sidecar（零端口污染） |
-| Spring Boot | 骨架 + `PasmCognitionClient` + `AssistController`，**未编译验证** | 编译/启动/三端联调全过；**53 个 Java 主类**；JPA 持久化 + Flyway 3 个迁移 + PostgreSQL 真库；四角色 HS256 JWT；双层授权；科室维度统计；LIS/HL7/FHIR 与 FHIR R4 只读投影 |
+| Spring Boot | 骨架 + `PasmCognitionClient` + `AssistController`，**未编译验证** | 编译/启动/三端联调全过；**53 个 Java 主类**；JPA 持久化 + Flyway **4 个迁移（新增 `chat_sessions` / `chat_messages` / `departments`）**+ PostgreSQL 真库；四角色 HS256 JWT；双层授权；科室维度统计；**人工坐诊全链路（转人工 / 接诊 / 双向消息 / 结束落 `Encounter`）+ 科室主数据 CRUD**；LIS/HL7/FHIR 与 FHIR R4 只读投影 |
 | Python 认知服务 | `domain.py` / `safety.py` / `service.py` 三个模块 | **13 个 Python 模块**：新增问诊树 `consult.py`、检验单 `lab.py`、三档 LLM 网关 `llm.py`、会话存储 `store.py`、受控学习 `learning.py`、`mcp/` sidecar；**15 条医疗路由**挂到网关（`/healthz` 的 `custom_routes=15`） |
-| Vue 前端 | 单个 `App.vue` 骨架，**未构建验证** | `vue-router` 三页（登录 / 三栏工作台 / 医护后台）+ `api.ts` + `identity.ts`；**结束问诊会真落 `Encounter`**；`vue-tsc` + `vite` 构建 0 错误；生产产物不含演示账号字样 |
-| 安全与身份 | 患者隔离认知侧测试；无登录/角色体系 | 四角色（患者/医护/科室管理员/超管）+ URL 级与资源级**双层授权** + 归属校验挡 IDOR + 演示账号默认关闭 + 401/403 分离 + 读/写双向审计 + 资料库按科室授权 |
+| Vue 前端 | 单个 `App.vue` 骨架，**未构建验证** | `vue-router` 三页（登录 / 三栏工作台 / 医护后台）+ `api.ts` + `identity.ts`；**结束问诊会真落 `Encounter`**；**医护后台新增「坐诊」台（队列 + 双向消息 + SSE 实时推送 + 结束）与「科室管理」标签（超管专属）**；登录页临床角色须选坐诊科室；`vue-tsc` + `vite` 构建 0 错误；生产产物不含演示账号字样 |
+| 安全与身份 | 患者隔离认知侧测试；无登录/角色体系 | 四角色（患者/医护/科室管理员/超管）+ URL 级与资源级**双层授权** + 归属校验挡 IDOR + 演示账号默认关闭 + 401/403 分离 + 读/写双向审计 + 资料库按科室授权 + **对接设置仅超管可见（医护后台不再显示该标签）** |
 | 自学习 | 只在 PLAN §8 的纸面设计，排期 **P3** | **前移落地**：候选池 + 审核台 + 知识池版本回滚（`V3__kb_candidates.sql`）；指纹去重、冲突挂起、采纳才入 `knowledge_docs`、驳回不入库；**已开启 `MEDICAL_LEARNING_AUTO` 跑完一轮真实就诊数据评测（71 项全绿）**；**生产开关仍关闭**（原因见 §5） |
 | 分发与工程化 | `pip install -e .`；无启动器；无迁移 | PyPI `pasm-medical` 0.1.0 → 0.1.1；`dist_smoke.py` 守住「装出来的包」；Windows 一键启动器 + `.gitattributes` 行尾契约；`tools/` 10 个验证脚本 |
-| 验证体系 | 认知 e2e **17 项** + 反例对照 | `run_checks.py --web --java` **14 项套件全绿**；实测项数：模块自检 **97**、认知 e2e **19**、学习 e2e **14**、三端联调 **81**、MCP selftest **23**、MCP stdio e2e **15**、后端真 PG **26**、真实就诊评测 **71**、分发形态冒烟 **9**（发版资产，本轮未跑） |
+| 验证体系 | 认知 e2e **17 项** + 反例对照 | `run_checks.py --web --java` **14 项套件全绿**；实测项数：模块自检 **97**、认知 e2e **19**、学习 e2e **14**、三端联调 **109**（较 `c6ce22a` 基线 +28：科室主数据 CRUD、登录选科校验、转人工幂等、坐诊队列科室隔离、接诊/双向消息/**SSE 实时推送**、AI 预问诊记录带入、在用科室禁删、结束落 `Encounter` 幂等）、MCP selftest **23**、MCP stdio e2e **15**、后端真 PG **26**、真实就诊评测 **71**、分发形态冒烟 **9**（发版资产，本轮未跑） |
 | 文档 | README + PLAN（108 + 385 行） | README + **7 份 docs**（FEASIBILITY / GUIDE / DB-MIGRATION / INTEGRATION-LIS-FHIR / PLAN / PLAN-CASE-LEARNING / REAL-LEARNING-EVAL）+ 本文与两篇分享稿 |
 
 ---
@@ -45,7 +45,7 @@
 | **P4 / P5** 影像 / 中医知识库 | 目标态 | ❌ 未开始；影像只做归档+转交，**不做分析**（合规正确） |
 | 合规 | 分类界定 / 等保三级 / 临床顾问 / 回顾性研究 | ❌ 仍未做，见 §5 |
 
-顺带新增了首版没排期的能力：**LIS/HL7/FHIR 对接**（`8d79072`）、**PostgreSQL + Flyway 版本化迁移**（`3492a75`）、**JWT 鉴权与会话存储可插拔**（`91b679e`）、**科室维度统计**（`7806b77`）、**FHIR R4 只读投影**、**Windows 一键启动器**。
+顺带新增了首版没排期的能力：**LIS/HL7/FHIR 对接**（`8d79072`）、**PostgreSQL + Flyway 版本化迁移**（`3492a75`）、**JWT 鉴权与会话存储可插拔**（`91b679e`）、**科室维度统计**（`7806b77`）、**FHIR R4 只读投影**、**Windows 一键启动器**、**科室主数据 + 人工坐诊全链路 + SSE 实时推送**（`9080203` / `b363dec`，把「AI 转人工后接不上真人」这块真实缺口补上）。
 
 ---
 
@@ -59,6 +59,7 @@
 | 审计与统计 | `485be27` / `f1c9905` / `7806b77` | 读事件留痕 + 每条带操作者 + 问题原文下发后台；统计改 DB 带时间窗计数（去掉「最近 200 条」截断与重复计数）；科室范围分流 |
 | 反馈与自学习 | `b68315c` / `a431107` / `c5f0fdf` | 医学动作后验（Beta-Bernoulli，只影响分诊候选排序）；候选池/审核台/版本回滚；真实就诊数据评测与三处真缺陷修复 |
 | 集成与数据 | `8d79072` / `3492a75` / `9e9ce8d` | HL7 v2 `ORU^R01` + FHIR `Observation`/`Bundle` 落 `lab_results`（幂等）；Flyway `V1/V2/V3`；依赖 `pasm-skills>=0.6.4` 修认知层患者隔离 |
+| 坐诊 / 科室 / SSE | `9080203` / `b363dec` | 科室主数据 `departments`（Flyway `V4`，5 个种子科室）+ 超管「科室管理」；登录选科校验（缺省/不存在 → 400）；患者一键转人工（红旗中断自动转接）+ 带 AI 预问诊记录；坐诊队列按科室隔离；接诊 → 双向消息 → 结束落 `Encounter`；**SSE 实时推送**（`ChatStreamService` + `SseEmitter` + 前端 `fetch`/`ReadableStream` 订阅 + 15s 心跳 + 断线重连）；在用科室禁删（提示改用停用） |
 | 分发 / 演示 | `afeb28b` / `ad29b59` / `ddf324e` | `register_medical_routes` 注册失败改**硬抛错** + `/healthz custom_routes` 可观察 + `dist_smoke.py`；Windows `.bat` 启动器（GBK/CRLF 契约、无控制台探测分支、端口钉命令行） |
 
 ---
@@ -75,10 +76,11 @@
 | 4 | 「今日问诊量」永远不超过 200，且一次问诊算两次 | 取最近 200 条在内存里筛 + 把 `ask`/`finish` 都算一次 | 全部改 DB 带时间窗计数，口径定义随响应返回 |
 | 5 | 资料库新增成功，提问却一直拒答 | `kb.recall` 把 `source` 又装饰一层前缀，自己的 key 过滤把资料全滤掉 | 端到端断言「新增资料后必须命中 doc 来源」 |
 | 6 | 同秒两次登录签出的 JWT 逐字节相同，登出一个把另一个也踢掉；前端把 403 当成登录失效 | payload `iat` 只到秒；401/403 都塌成 403 | 加 `jti`；服务端分开 401（未认证）/403（角色不足） |
-| 7 | **真实问诊落库的 `Encounter` 是空壳**，候选池恒产 0 条 | Python `summary()` 给 `chief_complaint`/`present_illness`/`triage.suggested_department`，且按合规**不含** `assessment`/`plan`；Java 读驼峰字段全 null。演示数据手工填齐字段，74 项联调一直**假绿** | `consultFinish` 对齐真实字段、补 `department`、`summaryOf` 生成去标识化摘要；`e2e_stack.py` 补 **7 项真实链路落库回归**（74 → **81 项**） |
+| 7 | **真实问诊落库的 `Encounter` 是空壳**，候选池恒产 0 条 | Python `summary()` 给 `chief_complaint`/`present_illness`/`triage.suggested_department`，且按合规**不含** `assessment`/`plan`；Java 读驼峰字段全 null。演示数据手工填齐字段，74 项联调一直**假绿** | `consultFinish` 对齐真实字段、补 `department`、`summaryOf` 生成去标识化摘要；`e2e_stack.py` 补 **7 项真实链路落库回归**（74 → **81 项**，当前三端联调已 **109 项**） |
 | 8 | 科室管理员对真实候选可见 0 条 | 分诊建议是复合值「发热门诊 / 感染科」，授权按单科室精确 `equals` | 落库取主科室用于授权归类，完整建议原样留在摘要里（**分诊规则仍在认知侧，Java 不重写**） |
 | 9 | 双击启动器满屏乱码 / 无控制台时卡死 / 端口莫名被占用 | `.bat` 用了 UTF-8 + LF + 跨行括号块；`DETACHED_PROCESS` 下 `java -version`/`netstat` 输出 0 字节；环境变量 `SERVER__PORT` 被 Spring 宽松绑定成 `server.port` | GBK + CRLF + 单行 `goto` 结构；探测改读文件/只看退出码；`--server.port=8081` 钉在命令行；`.gitattributes` 根因修复 |
 | 10 | 认知层患者 A 召回里混进 B 的过敏史 | `pasm-skills` 的 `PasmV1CoreBackend` 持有模块单例，`set_data_dir()` 改的是全局目录 | `pasm-skills` 加 `data_dir` 作用域 + RLock；medical 依赖升到 ≥0.6.4 |
+| 11 | **三端联调全绿，但「AI 转人工」接不上真人**：医护后台只有查看、没有坐诊功能、无在线即时沟通；患者点转人工无处可去；对接设置还暴露给非超管角色 | 坐诊/转人工链路根本没建（只有查看态）；实时消息用轮询、断线丢上下文；`/api/admin/config` 仅按「后台」粗粒度放开，未收归超管 | `9080203` + `b363dec`：补 `chat_sessions`/`chat_messages`（Flyway `V4`）+ 坐诊台（队列/接诊/双向消息/结束落 `Encounter`）；患者一键转人工、红旗中断自动转接、带 AI 预问诊记录；**SSE 实时推送 + 断线重连**；科室主数据 + 登录选科；对接设置**仅超管可见**；在用科室禁删 |
 
 > 方法论：**全绿 ≠ 断言有效**。反例对照（故意改坏 → 确认被抓到 → 还原）与「真实链路 + 真实数据」是这个项目两道最值钱的闸门。
 
@@ -87,7 +89,7 @@
 ## 5. 还有哪些问题（如实标注，别假装修好）
 
 ### 5.1 本轮复盘发现并**已修**的小问题
-- 文档验证项数口径漂移：`README.md` / `docs/GUIDE.md` / `docs/PLAN.md` / 配套 skill 里仍写着 `67 项` / `17 项` / `88 项` / `24 项` / `selftest 19 项` / `--java 21 项` 等旧数字，且同一文件自相矛盾（README 一处 67、一处 81）。已按 2026-11-05 实测统一为：**97 / 19 / 14 / 81 / 23 / 15 / 26 / 71**，`--java` 26 项含 `CandidatePostgresTest` 5 项。
+- 文档验证项数口径漂移：`README.md` / `docs/GUIDE.md` / `docs/PLAN.md` / 配套 skill 里仍写着 `67 项` / `17 项` / `88 项` / `24 项` / `selftest 19 项` / `--java 21 项` 等旧数字，且同一文件自相矛盾（README 一处 67、一处 81）。已按 2026-11-05 实测统一为：**97 / 19 / 14 / 109 / 23 / 15 / 26 / 71**（`c6ce22a` 基线为 81，新增坐诊/科室/SSE 后三端联调 **109**），`--java` 26 项含 `CandidatePostgresTest` 5 项。
 - 配套 skill 中三条「未做」记录已过时（前端结束问诊入口 `91b679e`、科室统计 `7806b77`、医护与科室管理员能力差异 `92ee718`），已改为带 commit 证据的修复状态表。
 
 ### 5.2 仍未解决（按严重度排序，写进文章不能省）
@@ -95,7 +97,7 @@
 |---|---|---|
 | **P0 合规** | 预问诊摘要按合规**不含医师结论**，候选正文实际是「患者自述 + 分诊建议」，**不具备作为机构回答依据的资格** | 已加正文护栏 `【预问诊采集·非医师结论，不得作为诊疗依据】`（不放进 tags，避免给相关性闸门新增命中词）；`MEDICAL_LEARNING_AUTO` **生产保持关闭**；根治须补「医师确认后的判断/处置」采集链路（P3） |
 | **P0 合规** | 规则表未经临床药师复核；未做医疗器械分类界定 / NMPA 注册路径；等保三级、单独同意、导出水印审批、临床顾问与回顾性研究均未启动 | MIT 只覆盖代码，**代码开源 ≠ 可合法用于临床诊断**；投产前必须补齐 |
-| P1 功能 | 影像归档、中医知识库**未开始**；pgvector / MinIO / Redis / SSE 流式仍是设计目标 | 影像刻意只归档+转交、不做分析（无三类证） |
+| P1 功能 | 影像归档、中医知识库**未开始**；pgvector / MinIO / Redis 仍是设计目标 | 影像刻意只归档+转交、不做分析（无三类证）；**SSE 实时推送已于 2026-11-05 落地**（坐诊双向消息用 `SseEmitter` + 前端 `fetch`/`ReadableStream` 订阅，替代轮询），Redis 仅在多主机水平扩容时才是必需 |
 | P1 集成 | LIS 的 **TCP MLLP 监听、HL7 ACK 报文、LOINC/SNOMED 映射**未实现 | 边界以 `docs/INTEGRATION-LIS-FHIR.md` §7 为准 |
 | P1 部署 | 多主机水平扩容需把 `SessionStore` 接 Redis/DB（协议已就位，当前默认 file 只覆盖单机多 worker）；生产需注入 `MEDICAL_AUTH_JWT_SECRET`、接医院统一身份（OIDC/OAuth2） | 单实例/单机可用，多主机未验证 |
 | P2 已知结构 | 红旗中断路径 `triage()` 不给 `suggested_department` → `department` 为空、候选按设计仅超管可见；科室角色看不到无 `patientRef` 的登录/登出/改配置审计事件；`stop-demo.bat` 在真正无控制台父进程下取 PID 仍用 `netstat \| findstr` | 均已有明确边界说明，**未改** |
@@ -111,7 +113,7 @@
 JAVA_HOME='C:\Program Files\Java\jdk-18.0.1.1' \
   "C:/Python312/python.exe" "C:/Users/<你>/.workbuddy/skills/pasm-medical/scripts/run_checks.py" \
   --web --java --repo "E:/AI/pasm/code/pasm-medical"
-# 期望：14 项套件通过 / 0 项失败（三端联调 81 项、后端真库 BUILD SUCCESS）
+# 期望：14 项套件通过 / 0 项失败（三端联调 109 项、后端真库 BUILD SUCCESS）
 # 注：run_checks.py 是维护者本机的编排器（放在配套 skill 目录，不在仓库里）。
 # 外部读者 clone 后按 README.md「自检与端到端」逐条跑仓库内脚本即可，结论等价。
 
