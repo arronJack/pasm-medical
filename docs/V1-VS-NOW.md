@@ -1,6 +1,6 @@
 # 第一版 → 当前版：更新了哪些内容
 
-> 生成日期：2026-11-05 · 仓库当前 HEAD：`c6ce22a` · 三端（Gitee / GitHub / GitCode）SHA 一致
+> 生成日期：2026-11-05 · 数据基线 HEAD：`c6ce22a`（其后仅含本文档自身的勘误提交）· 三端（Gitee / GitHub / GitCode）SHA 一致
 > 本文是**可核对的对比清单**，配套成稿见 [`SHARE-CSDN.md`](SHARE-CSDN.md) 与 [`SHARE-WECHAT.md`](SHARE-WECHAT.md)。
 
 ## 0. 基线定义（先对齐口径，避免"第一版"各说各话）
@@ -9,7 +9,7 @@
 |---|---|
 | **第一版** | 2026-09-21 首个提交 `944e295`（`feat: 医院智能诊疗辅助系统`），同日 `docs/PLAN.md` 标注 `v0.1`，PyPI 侧对应 `pasm-medical 0.1.0` |
 | **第一版当时的自述** | README「现状与后续」原文：Spring Boot 业务层 = **骨架 + 认知客户端，未编译验证**；Vue 前端 = **骨架，未构建验证**；验证只有 **认知 e2e 17 项 + 反例对照**；中医知识库 / 多模态**未开始** |
-| **当前版** | 2026-11-05 HEAD `c6ce22a`，`pyproject.toml` = **0.1.1**，共 **38 次提交**（9/21 共 9 次、9/22 共 14 次、9/23 共 6 次、11/04 共 5 次、11/05 共 4 次） |
+| **当前版** | 2026-11-05 基线 `c6ce22a`，`pyproject.toml` = **0.1.1**，截至基线共 **38 次提交**（9/21 共 9 次、9/22 共 14 次、9/23 共 6 次、11/04 共 5 次、11/05 共 4 次；其后仅文档勘误） |
 | 代码体量变化 | 首版 **18 个文件 / 2471 行新增** → 相对首版 `git diff --stat 944e295 HEAD` = **112 个文件变更 / +19825 行 / −294 行** |
 | 许可与托管 | 首版即 MIT，现仍是 MIT；Gitee `arronzheng/pasm-medical`、GitHub `arronJack/pasm-medical`、GitCode `arronzheng/pasm-medical` 三端公开 |
 
