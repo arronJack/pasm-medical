@@ -70,7 +70,9 @@ public class SecurityConfig {
             .cors(cors -> cors.configurationSource(corsSource()))
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/actuator/health", "/api/auth/login").permitAll()
+                .requestMatchers("/actuator/health", "/api/auth/login",
+                        // 登录页要加载科室下拉，此时还没有令牌；只返回启用科室名称
+                        "/api/departments/public").permitAll()
                 // ★ /error 必须放行：请求体畸形（如 JSON 类型不对）时 Spring 会 ERROR 转发到 /error，
                 //   若 /error 仍需认证，客户端拿到的就不是真正的 **400**，而是一个误导性的 **403**
                 //   （实测：tags 传成数组 → HttpMessageNotReadableException，本该 400，却被挡成 403）。
@@ -80,6 +82,9 @@ public class SecurityConfig {
                 // ★ 顺序敏感：更具体的规则必须写在前面，否则会被下面的通配吃掉
                 // 系统配置：仅超管（决定患者数据是否出网，非科室权限）
                 .requestMatchers("/api/admin/config").hasRole("SUPER_ADMIN")
+                // 科室是全院主数据（改名/停用影响历史归类与统计口径）：仅超管
+                .requestMatchers("/api/admin/departments", "/api/admin/departments/**")
+                    .hasRole("SUPER_ADMIN")
                 // 资料库手动全量同步：仅超管（运维操作，推全院生效全集）
                 .requestMatchers("/api/admin/kb/sync").hasRole("SUPER_ADMIN")
                 // 自学习审核台：生成候选（扫全库就诊写候选池）与知识池回滚（停用资料）仅超管

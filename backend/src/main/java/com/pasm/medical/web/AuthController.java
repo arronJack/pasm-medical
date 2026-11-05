@@ -6,6 +6,7 @@ import com.pasm.medical.config.Role;
 import com.pasm.medical.config.TokenService;
 import com.pasm.medical.domain.AiAudit;
 import com.pasm.medical.service.AuditService;
+import com.pasm.medical.service.DepartmentService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -18,10 +19,12 @@ public class AuthController {
 
     private final TokenService tokens;
     private final AuditService audit;
+    private final DepartmentService departments;
 
-    public AuthController(TokenService tokens, AuditService audit) {
+    public AuthController(TokenService tokens, AuditService audit, DepartmentService departments) {
         this.tokens = tokens;
         this.audit = audit;
+        this.departments = departments;
     }
 
     @PostMapping("/login")
@@ -29,9 +32,23 @@ public class AuthController {
         if (req.username() == null || req.password() == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "账号和密码不能为空"));
         }
-        TokenService.LoginResult r = tokens.login(req.username().trim(), req.password());
+        String username = req.username().trim();
+        // ★ 先用"账号密码是否正确"做一次判定：错误一律 401（不区分账号不存在/密码错），
+        //   正确之后才谈科室 —— 否则会变成"用错误密码也能探出账号是医护"。
+        if (!tokens.credentialsValid(username, req.password())) {
+            return ResponseEntity.status(401).body(Map.of("error", "账号或密码不正确"));
+        }
+        Role role = tokens.roleOf(username);
+        if (role == Role.DOCTOR || role == Role.DEPT_ADMIN) {
+            if (req.department() == null || req.department().isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "该账号需选择坐诊科室"));
+            }
+            if (!departments.existsActive(req.department())) {
+                return ResponseEntity.badRequest().body(Map.of("error", "科室不存在或已停用"));
+            }
+        }
+        TokenService.LoginResult r = tokens.login(username, req.password(), req.department());
         if (r == null) {
-            // 不区分"账号不存在"与"密码错" —— 避免被用来枚举账号
             return ResponseEntity.status(401).body(Map.of("error", "账号或密码不正确"));
         }
         Identity id = r.identity();
@@ -95,9 +112,11 @@ public class AuthController {
         // 前端据此禁用按钮；**服务端仍会独立拒绝**，不能只靠界面隐藏
         m.put("canWriteKb", role == Role.SUPER_ADMIN);
         m.put("canWriteConfig", role == Role.SUPER_ADMIN);
+        m.put("canManageDepartments", role == Role.SUPER_ADMIN);
         return m;
     }
 
-    public record LoginRequest(String username, String password) {
+    /** {@code department} 仅医护/科室管理员需要（本次坐诊科室）。 */
+    public record LoginRequest(String username, String password, String department) {
     }
 }

@@ -38,9 +38,35 @@
         <button @click="exitHistory">退出只读，开始新问询</button>
       </div>
 
+      <!-- 转人工：AI 不是万能的，必须有一条"找真人"的出口 -->
+      <div v-if="!readonly" class="handoff-bar" :class="{ live: !!humanSession }">
+        <template v-if="!humanSession">
+          <span class="hb-hint">需要真人医生？</span>
+          <select v-model="chosenDept">
+            <option value="" disabled>选择科室</option>
+            <option v-for="d in deptOptions" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <button class="ghost" :disabled="!chosenDept || handoffBusy" @click="handoff()">
+            {{ handoffBusy ? '转接中…' : '转人工' }}
+          </button>
+        </template>
+        <template v-else>
+          <span class="hb-live">
+            {{ humanSession.status === 'WAITING'
+              ? '已转接「' + humanSession.department + '」，等待医生接诊…'
+              : '医生 ' + (humanSession.assignedName || '') + ' 正在为您服务' }}
+          </span>
+          <span class="hb-dept">{{ humanSession.department }}</span>
+        </template>
+        <span v-if="handoffErr" class="hb-err">{{ handoffErr }}</span>
+      </div>
+
       <div ref="msgBox" class="messages">
-        <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
+        <div v-for="(m, i) in messages" :key="m.chatId ?? i" class="msg" :class="m.role">
           <div class="bubble">{{ m.text }}</div>
+          <div v-if="m.role === 'doctor' || m.role === 'system'" class="mname">
+            {{ m.senderName || (m.role === 'doctor' ? '医生' : '系统') }}
+          </div>
 
           <!-- 历史就诊的结构化详情（字段各自独立，而不是拼成一句话） -->
           <div v-if="m.encounter" class="enc">
@@ -89,7 +115,7 @@
       </div>
 
       <!-- 追问区：问题是**规则决定的**，why 可展开看依据 -->
-      <div v-if="pending" class="ask">
+      <div v-if="pending && !humanSession" class="ask">
         <div class="ask-q">
           {{ pending.text }}
           <details class="why"><summary>为什么问这个</summary>{{ pending.why }}</details>
@@ -111,6 +137,7 @@
         </label>
         <textarea v-model="draft" :disabled="readonly"
                   :placeholder="readonly ? '只读模式：先点上方「退出只读」再输入'
+                                         : humanSession ? '给医生发消息…（Ctrl+Enter 发送）'
                                          : '描述症状，或直接提问（Ctrl+Enter 发送）'"
                   @keydown.ctrl.enter="send" />
         <button class="primary" :disabled="readonly || busy || !draft.trim()" @click="send">
@@ -183,12 +210,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
-import { api, type ConsultState, type EncounterDetail, type Evidence, type LabItem, type Triage } from '../api'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { api, type ChatSession, type ConsultState, type EncounterDetail, type Evidence, type LabItem, type Triage } from '../api'
 
 interface Msg {
-  role: 'user' | 'assistant'
+  /** doctor / system 来自人工坐诊会话（与 AI 消息同列渲染，保持时间顺序）。 */
+  role: 'user' | 'assistant' | 'doctor' | 'system'
   text: string
+  /** 人工会话消息 id —— 轮询去重用，避免同一条消息重复出现。 */
+  chatId?: number
+  senderName?: string
   evidence?: Evidence[]
   refused?: boolean
   resolved?: string
@@ -235,8 +266,104 @@ const urgencyText = computed(() => {
   return u === 'emergency' ? '紧急' : u === 'urgent' ? '尽快' : '常规'
 })
 
-/** 有进行中的问诊且非只读时，才显示「结束问诊」入口（落 Encounter 到业务库）。 */
-const canFinish = computed(() => !!state.value && !readonly.value)
+/** 有进行中的问诊且非只读、未转人工时，才显示「结束问诊」入口（转人工后由医生结束并写病历）。 */
+const canFinish = computed(() => !!state.value && !readonly.value && !humanSession.value)
+
+// ── 人工坐诊（转人工）───────────────────────────────────────────────
+//  ★ AI 不是万能的：必须有"找真人"的出口，且转接后消息要与 AI 消息同列显示，
+//    不能开一个新窗口把上下文丢掉（医生看不到患者已经说过什么，等于重新问一遍）。
+const humanSession = ref<ChatSession | null>(null)
+const deptOptions = ref<string[]>([])
+const chosenDept = ref('')
+const handoffBusy = ref(false)
+const handoffErr = ref('')
+/** 已渲染过的人工消息 id（去重）。 */
+const chatSeen = new Set<number>()
+let chatTimer: number | undefined
+
+async function loadDeptOptions() {
+  try {
+    deptOptions.value = await api.departmentsPublic()
+    if (!chosenDept.value && deptOptions.value.length) {
+      chosenDept.value = deptOptions.value[0]
+    }
+  } catch {
+    deptOptions.value = []
+  }
+}
+
+function pushChatMsg(m: { id: number; sender: string; senderName: string; body: string }) {
+  if (chatSeen.has(m.id)) return
+  chatSeen.add(m.id)
+  const role: Msg['role'] = m.sender === 'DOCTOR' ? 'doctor'
+    : m.sender === 'SYSTEM' ? 'system' : 'user'
+  messages.value.push({ role, text: m.body, chatId: m.id, senderName: m.senderName })
+}
+
+/** 转人工。`auto=true` 表示红旗中断时自动转接（科室取分诊建议的第一段）。 */
+async function handoff(auto = false) {
+  if (handoffBusy.value || humanSession.value) return
+  const dept = auto
+    ? normalizeDept(state.value?.triage?.suggested_department) || chosenDept.value
+    : chosenDept.value
+  if (!dept) {
+    if (!auto) handoffErr.value = '请选择科室'
+    return
+  }
+  handoffBusy.value = true
+  handoffErr.value = ''
+  try {
+    const chief = state.value?.chiefComplaint || lastUserText()
+    const s = await api.chatHandoff({
+      patientRef: patient.value.ref,
+      department: dept,
+      chiefComplaint: chief,
+      urgency: state.value?.triage?.urgency || 'routine',
+    })
+    humanSession.value = s
+    chosenDept.value = s.department
+    await pollChat(true)
+  } catch (e) {
+    handoffErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    handoffBusy.value = false
+  }
+}
+
+function normalizeDept(raw?: string): string {
+  if (!raw) return ''
+  const first = raw.split(/\s*\/\s*|、|,/)[0].trim()
+  if (deptOptions.value.includes(first)) return first
+  return deptOptions.value.includes(raw.trim()) ? raw.trim() : ''
+}
+
+function lastUserText(): string {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m.role === 'user' && !m.chatId) return m.text.slice(0, 200)
+  }
+  return ''
+}
+
+/** 恢复现场 + 轮询。2s 增量拉取：既有"即时"体感，也不会重复渲染。 */
+async function pollChat(reset = false) {
+  try {
+    const s = await api.chatMy()
+    if (!s) {
+      humanSession.value = null
+      return
+    }
+    humanSession.value = s
+    const last = reset ? 0 : Math.max(0, ...Array.from(chatSeen))
+    const rows = await api.chatMessages(s.id, last)
+    if (rows.length) {
+      rows.forEach(pushChatMsg)
+      await scrollDown()
+    }
+  } catch {
+    /* 轮询失败不打断问诊：下一轮会重试 */
+  }
+}
 
 const history = ref<{ id: string; time: string; title: string; summary: string; urgency?: string }[]>([])
 
@@ -255,7 +382,15 @@ async function loadPatient() {
   }
 }
 
-onMounted(loadPatient)
+onMounted(async () => {
+  await Promise.all([loadPatient(), loadDeptOptions()])
+  await pollChat(true)
+  chatTimer = window.setInterval(() => { pollChat() }, 2000)
+})
+
+onBeforeUnmount(() => {
+  if (chatTimer) window.clearInterval(chatTimer)
+})
 
 async function scrollDown() {
   await nextTick()
@@ -268,6 +403,25 @@ async function send() {
   if (readonly.value) return
   const q = draft.value.trim()
   if (!q || busy.value) return
+
+  // ★ 已转人工：消息进人工会话（医生端轮询可见），不再走 AI 问诊树 ——
+  //   两条链路同时回答会让患者收到互相矛盾的两套说法，也会污染问诊采集。
+  if (humanSession.value && humanSession.value.status !== 'CLOSED') {
+    draft.value = ''
+    busy.value = true
+    try {
+      const m = await api.chatSend(humanSession.value.id, q)
+      pushChatMsg(m)
+      await scrollDown()
+    } catch (e) {
+      handoffErr.value = e instanceof Error ? e.message : String(e)
+      draft.value = q
+    } finally {
+      busy.value = false
+    }
+    return
+  }
+
   draft.value = ''
   messages.value.push({ role: 'user', text: q })
   await scrollDown()
@@ -293,11 +447,18 @@ async function send() {
 
 function applyState(st: ConsultState) {
   state.value = st
+  // 分诊建议科室可作为转人工的默认值（复合值取第一段，且必须在启用科室里）
+  if (st.triage?.suggested_department && !humanSession.value) {
+    const d = normalizeDept(st.triage.suggested_department)
+    if (d) chosenDept.value = d
+  }
   if (st.halted && st.triage) {
     messages.value.push({
       role: 'assistant',
       text: '发现需要立即处理的警示信号，问诊已中止。' + st.triage.advice,
     })
+    // 红旗中断 = 必须有人接住：自动转人工（科室取分诊建议），别让患者停在"建议就医"四个字上。
+    if (!humanSession.value) handoff(true)
   } else if (st.question) {
     messages.value.push({ role: 'assistant', text: st.question.text, qkey: st.question.key })
   }
@@ -547,6 +708,29 @@ function rowClass(it: LabItem) {
 .messages { flex: 1; overflow-y: auto; padding: 16px; }
 .msg { margin-bottom: 14px; }
 .msg.user { text-align: right; }
+/* 人工会话：医生消息靠左但换色，系统提示居中弱化 —— 与 AI 消息可一眼区分 */
+.msg.doctor .bubble { background: #eaf5ef; border-color: #cfe7da; }
+.msg.system { text-align: center; }
+.msg.system .bubble {
+  background: transparent; border-style: dashed; color: var(--text-3); font-size: 12px;
+}
+.mname { margin-top: 3px; font-size: 11px; color: var(--text-3); }
+
+/* 转人工条 */
+.handoff-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: #fafbfc;
+  font-size: 12px; color: var(--text-2);
+}
+.handoff-bar.live { background: #eef7f2; }
+.handoff-bar select {
+  padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff;
+}
+.handoff-bar button { padding: 5px 12px; font-size: 12px; }
+.hb-hint { color: var(--text-3); }
+.hb-live { color: var(--ok-fg, #047857); font-weight: 500; }
+.hb-dept { color: var(--text-3); }
+.hb-err { color: var(--danger-fg); }
 .bubble {
   display: inline-block; padding: 8px 12px; border-radius: 10px;
   background: var(--surface); border: 1px solid var(--line);

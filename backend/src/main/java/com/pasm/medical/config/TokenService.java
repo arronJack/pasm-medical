@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import com.pasm.medical.service.DepartmentService;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -65,12 +66,15 @@ public class TokenService {
 
     private final JwtService jwt;
     private final boolean demoLoginEnabled;
+    private final DepartmentService departments;
 
     public TokenService(
             @Value("${medical.auth.demo-login-enabled:false}") boolean demoLoginEnabled,
-            JwtService jwt) {
+            JwtService jwt,
+            DepartmentService departments) {
         this.demoLoginEnabled = demoLoginEnabled;
         this.jwt = jwt;
+        this.departments = departments;
         if (demoLoginEnabled) {
             log.warn("⚠ 演示账号已启用（{}，密码写死）—— 只允许在 dev 档使用；"
                             + "生产必须改接医院统一身份（OIDC/OAuth2 或签名 JWT）",
@@ -108,8 +112,12 @@ public class TokenService {
      *
      * <p>失败**不区分**"用户不存在"与"密码错"，也不暴露"演示账号是否启用" ——
      * 三者对外都是同一个 401，避免被用来枚举账号或探测部署形态。
+     *
+     * <p>★ <b>科室由登录人选择</b>（医护 / 科室管理员）：这是"本次坐诊在哪个科室"，
+     * 不是永久属性 —— 同一位医生可能轮转到不同科室。但选择必须落在**总后台维护且启用中**
+     * 的科室上；随便传个字符串不能生效（写死字符串拼错不报错，只会静默匹配不上）。
      */
-    public LoginResult login(String username, String password) {
+    public LoginResult login(String username, String password, String requestedDepartment) {
         if (!demoLoginEnabled) {
             return null;
         }
@@ -117,10 +125,36 @@ public class TokenService {
         if (u == null || !u.password().equals(password)) {
             return null;
         }
-        Identity id = new Identity(username, u.role(), u.department(), u.staffId(),
+        String dept = u.department();
+        if (u.role() == Role.DOCTOR || u.role() == Role.DEPT_ADMIN) {
+            String pick = requestedDepartment == null ? "" : requestedDepartment.trim();
+            if (pick.isEmpty() || !departments.existsActive(pick)) {
+                return null;   // 账号密码对，但科室缺省/不存在 → 登录失败（不签发错误范围的身份）
+            }
+            dept = pick;
+        }
+        Identity id = new Identity(username, u.role(), dept, u.staffId(),
                 u.patientRef(), u.displayName());
         // ★ 身份写进令牌声明：服务端不再存会话，重启/多实例都不会掉登录态
         return new LoginResult(jwt.issue(id), id);
+    }
+
+    /** 账号对应的角色（登录前用于判断"是否必须选科室"）；未知账号返回 null。 */
+    public Role roleOf(String username) {
+        if (!demoLoginEnabled || username == null) {
+            return null;
+        }
+        DemoAccount u = DEMO_USERS.get(username.trim());
+        return u == null ? null : u.role();
+    }
+
+    /** 账号密码是否正确（用于"先验密码、再验科室"，避免把科室错误混进 401）。 */
+    public boolean credentialsValid(String username, String password) {
+        if (!demoLoginEnabled || username == null || password == null) {
+            return false;
+        }
+        DemoAccount u = DEMO_USERS.get(username.trim());
+        return u != null && u.password().equals(password);
     }
 
     /** 校验令牌，返回身份；无效 / 过期 / 已撤销 一律返回 null（调用方统一按 401 处理）。 */

@@ -532,7 +532,7 @@ def main() -> int:                                # noqa: C901
 
         # ---------- 10c) 数据范围：科室角色只看本科室，超管看全院
         st, d = req("POST", base + "/api/auth/login",
-                    {"username": "doctor", "password": "123456"})
+                    {"username": "doctor", "password": "123456", "department": "发热门诊"})
         dtoken = d.get("token")
         check("医护账号可登录且带科室绑定（doctor → 发热门诊）",
               st == 200 and d.get("role") == "DOCTOR"
@@ -607,7 +607,7 @@ def main() -> int:                                # noqa: C901
         #   deptadmin 此前只在代码与文档里定义、从未被 e2e 覆盖，补上它，
         #   P1-2 四角色的数据范围才算真正被端到端钉死。
         st, d = req("POST", base + "/api/auth/login",
-                    {"username": "deptadmin", "password": "123456"})
+                    {"username": "deptadmin", "password": "123456", "department": "发热门诊"})
         gtoken = d.get("token")
         check("科室管理员账号可登录且带科室绑定（deptadmin → 发热门诊）",
               st == 200 and d.get("role") == "DEPT_ADMIN"
@@ -681,6 +681,111 @@ def main() -> int:                                # noqa: C901
             check("★ 科室管理员（临床侧）可跨患者查阅个体档案（维持现状：仅聚合视图按科室过滤）",
                   st == 200 and d.get("ref") == "demo-patient-002",
                   str(st) + " " + str(d)[:100])
+
+        # ---------- 10e) 科室主数据 + 登录选科 + 人工坐诊（转人工全链路）
+        #   ★ 这组断言覆盖用户明确要求的"线路均需走通"：
+        #     总后台维护科室 → 医护登录选科 → 患者转人工 → 科室队列 → 接诊 →
+        #     双向消息 → 结束落就诊。每条都走真实接口，不 mock。
+        st, d = req("GET", base + "/api/departments/public")
+        check("★ 登录页科室列表匿名可读（只含启用科室）",
+              st == 200 and isinstance(d, list) and "发热门诊" in d,
+              str(st) + " " + str(d)[:120])
+
+        st, d = req("POST", base + "/api/auth/login",
+                    {"username": "doctor", "password": "123456"})
+        check("★ 反例：医护登录不选科室 → 400（不能默认成某个科室）", st == 400, str(st))
+        st, d = req("POST", base + "/api/auth/login",
+                    {"username": "doctor", "password": "123456", "department": "不存在的科室"})
+        check("★ 反例：医护登录选未配置科室 → 400", st == 400, str(st))
+
+        st, d = req("GET", base + "/api/admin/departments", token=dtoken)
+        check("★ 反例：医护访问科室管理 → 403（仅超管）", st == 403, str(st))
+
+        st, d = req("POST", base + "/api/admin/departments",
+                    {"name": "联调测试科", "sortOrder": 900}, token=token)
+        new_dept = d.get("id") if isinstance(d, dict) else None
+        check("★ 超管新增科室", st == 200 and bool(new_dept), str(st) + " " + str(d)[:120])
+        if new_dept:
+            st, d = req("GET", base + "/api/departments/public")
+            check("★ 新科室立刻出现在登录选择里",
+                  st == 200 and "联调测试科" in d, str(d)[:140])
+            st, d = req("PATCH", base + "/api/admin/departments/%s" % new_dept,
+                        {"active": False}, token=token)
+            check("★ 停用科室", st == 200 and d.get("active") is False, str(d)[:120])
+            st, d = req("GET", base + "/api/departments/public")
+            check("★ 停用后不再出现在登录选择里",
+                  st == 200 and "联调测试科" not in d, str(d)[:140])
+            st, d = req("PATCH", base + "/api/admin/departments/%s" % new_dept,
+                        {"active": True}, token=token)
+            st, d = req("DELETE", base + "/api/admin/departments/%s" % new_dept, token=token)
+            check("★ 删除科室", st == 200, str(st))
+
+        # 第二个科室的医生：用于验证坐诊队列的科室隔离
+        st, d = req("POST", base + "/api/auth/login",
+                    {"username": "doctor", "password": "123456", "department": "心内科"})
+        ktoken = d.get("token") if isinstance(d, dict) else None
+        check("★ 同一医护账号可选择不同坐诊科室（心内科）",
+              st == 200 and bool(ktoken) and d.get("department") == "心内科",
+              str(d)[:140])
+
+        st, d = req("POST", base + "/api/chat/handoff",
+                    {"department": "发热门诊", "chiefComplaint": "联调：发热咳嗽"},
+                    token=ptoken)
+        sid = d.get("id") if isinstance(d, dict) else None
+        check("★ 患者转人工 → 进入发热门诊队列（WAITING）",
+              st == 200 and bool(sid) and d.get("status") == "WAITING",
+              str(st) + " " + str(d)[:160])
+        if sid:
+            st, d = req("POST", base + "/api/chat/handoff",
+                        {"department": "发热门诊", "chiefComplaint": "重复点一次"}, token=ptoken)
+            check("★ 重复转人工幂等（不会刷出多条会话）",
+                  st == 200 and d.get("id") == sid, str(d)[:120])
+
+            st, d = req("GET", base + "/api/chat/queue", token=dtoken)
+            check("★ 发热门诊医生队列包含该会话",
+                  st == 200 and any(x.get("id") == sid for x in d), str(d)[:160])
+            if ktoken:
+                st, d = req("GET", base + "/api/chat/queue", token=ktoken)
+                check("★ 心内科医生队列不含该会话（科室隔离）",
+                      st == 200 and all(x.get("id") != sid for x in d), str(d)[:160])
+            st, d = req("GET", base + "/api/chat/queue", token=ptoken)
+            check("★ 反例：患者访问坐诊队列 → 403", st == 403, str(st))
+
+            if ktoken:
+                st, d = req("POST", base + "/api/chat/%s/take" % sid, token=ktoken)
+                check("★ 反例：跨科室接诊 → 403", st == 403, str(st))
+
+            st, d = req("POST", base + "/api/chat/%s/take" % sid, token=dtoken)
+            check("★ 接诊成功 → HUMAN 且记录接诊人",
+                  st == 200 and d.get("status") == "HUMAN" and d.get("assignedStaff") == "doctor",
+                  str(d)[:160])
+            st, d = req("POST", base + "/api/chat/%s/messages" % sid,
+                        {"body": "医生：请问最高体温多少？"}, token=dtoken)
+            check("★ 医生发送消息", st == 200 and d.get("sender") == "DOCTOR", str(d)[:120])
+            st, d = req("GET", base + "/api/chat/%s/messages?afterId=0" % sid, token=ptoken)
+            check("★ 患者能收到医生消息（同列展示，不丢上下文）",
+                  st == 200 and any(m.get("sender") == "DOCTOR" for m in d), str(d)[:180])
+            st, d = req("POST", base + "/api/chat/%s/messages" % sid,
+                        {"body": "患者：最高 39.2 度"}, token=ptoken)
+            check("★ 患者发送消息", st == 200 and d.get("sender") == "PATIENT", str(d)[:120])
+            st, d = req("GET", base + "/api/chat/%s/messages?afterId=0" % sid, token=dtoken)
+            check("★ 医生能收到患者消息（增量拉取不漏）",
+                  st == 200 and any(m.get("sender") == "PATIENT" for m in d), str(d)[:180])
+
+            st, d = req("POST", base + "/api/chat/%s/close" % sid,
+                        {"assessment": "上呼吸道感染可能", "plan": "对症退热，必要时复诊"},
+                        token=dtoken)
+            enc_id = d.get("encounterId") if isinstance(d, dict) else None
+            check("★ 结束会话并落就诊（记录医师判断/处置）",
+                  st == 200 and bool(enc_id), str(st) + " " + str(d)[:160])
+            st, d = req("GET", base + "/api/patient/encounters?ref=demo-patient-001", token=token)
+            check("★ 人工坐诊结果进入患者就诊时间轴",
+                  st == 200 and any(e.get("title") == "联调：发热咳嗽" for e in d),
+                  str(d)[:200])
+            st, d = req("POST", base + "/api/chat/%s/close" % sid, {}, token=dtoken)
+            check("★ 重复结束幂等（不重复落就诊）",
+                  st == 200 and d.get("alreadyClosed") is True and d.get("encounterId") is None,
+                  str(d)[:160])
 
         st, d = req("GET", base + "/api/admin/patients", token=token)
         refs_all = [x.get("ref") for x in d] if isinstance(d, list) else []

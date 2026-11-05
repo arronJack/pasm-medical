@@ -37,6 +37,96 @@
         <p class="hint">点开某位患者可查看《预问诊摘要》全文与对话轨迹（可审计）。</p>
       </template>
 
+      <!-- 坐诊台：转人工会话的排队、接诊与实时对话 -->
+      <template v-else-if="tab === 'clinic'">
+        <h2>坐诊台</h2>
+        <p class="hint">
+          患者转人工后进入<strong>本科室队列</strong>。接诊后可与患者实时对话；结束时写入一条就诊记录
+          （填写的「判断/处置」属于医师结论，会成为自学习候选的来源）。
+        </p>
+        <p v-if="chatErr" class="hint warn">{{ chatErr }}</p>
+
+        <div class="clinic">
+          <aside class="cq">
+            <div class="cq-h">会话（{{ queue.length }}）</div>
+            <button
+              v-for="s in queue" :key="s.id"
+              class="cq-item" :class="{ on: activeChat?.id === s.id }"
+              @click="openSession(s)"
+            >
+              <span class="cq-top">
+                <b>{{ s.patientRef }}</b>
+                <em :class="s.status === 'WAITING' ? 'warnb' : 'okb'">
+                  {{ s.status === 'WAITING' ? '等待接诊' : '人工中' }}
+                </em>
+              </span>
+              <span class="cq-sub">{{ s.chiefComplaint || '未填主诉' }} · {{ s.department }}</span>
+              <span class="cq-sub muted">{{ s.lastMessage || '—' }}</span>
+            </button>
+            <p v-if="!queue.length" class="empty">
+              暂无会话。患者可在问诊页点「转人工」，或红旗命中后自动转接。
+            </p>
+            <button class="ghost" @click="loadQueue">刷新队列</button>
+          </aside>
+
+          <section class="chat">
+            <template v-if="activeChat">
+              <div class="chat-h">
+                <b>{{ activeChat.patientRef }}</b>
+                <span class="scopebadge">{{ activeChat.department }}</span>
+                <span class="scopebadge" :class="{ muted: activeChat.status === 'WAITING' }">
+                  {{ activeChat.status === 'WAITING' ? '等待接诊' : '人工中' }}
+                </span>
+                <span v-if="activeChat.assignedName" class="scopebadge muted">
+                  接诊：{{ activeChat.assignedName }}
+                </span>
+                <button v-if="activeChat.status === 'WAITING'" class="primary" @click="takeSession">接诊</button>
+                <button v-else class="ghost" @click="closePanel = true">结束并写病历</button>
+              </div>
+
+              <div ref="chatBox" class="chat-body">
+                <div v-for="m in chatMsgs" :key="m.id" class="msg" :class="m.sender.toLowerCase()">
+                  <div class="bubble">{{ m.body }}</div>
+                  <div class="mmeta">{{ m.senderName }} · {{ m.createdAt.slice(11, 16) }}</div>
+                </div>
+                <p v-if="!chatMsgs.length" class="empty">还没有消息</p>
+              </div>
+
+              <div class="chat-in">
+                <input
+                  v-model="chatDraft" placeholder="输入消息，回车发送"
+                  @keyup.enter="sendChat"
+                />
+                <button
+                  class="primary"
+                  :disabled="!chatDraft.trim() || activeChat.status === 'WAITING'"
+                  @click="sendChat"
+                >发送</button>
+              </div>
+              <p v-if="activeChat.status === 'WAITING'" class="hint warn">
+                请先点「接诊」再回复 —— 允许未接诊就回复，会让同一患者同时被多人答，责任无法归属。
+              </p>
+
+              <div v-if="closePanel" class="closebox">
+                <div class="cq-h">结束就诊并写入病历</div>
+                <label><span>判断（选填，医师结论）</span>
+                  <input v-model="closeAssessment" placeholder="如：上呼吸道感染可能" />
+                </label>
+                <label><span>处置（选填）</span>
+                  <input v-model="closePlan" placeholder="如：对症退热，必要时门诊复诊" />
+                </label>
+                <p class="hint">这两项会随本次会话写入就诊记录；留空则不编造结论（预问诊本身不是诊断）。</p>
+                <div class="save-row">
+                  <button class="primary" @click="doClose">确认结束</button>
+                  <button class="ghost" @click="closePanel = false">取消</button>
+                </div>
+              </div>
+            </template>
+            <p v-else class="empty">从左侧选择一个会话</p>
+          </section>
+        </div>
+      </template>
+
       <!-- 资料库 -->
       <template v-else-if="tab === 'kb'">
         <h2>资料库</h2>
@@ -237,6 +327,42 @@
         </div>
       </template>
 
+      <!-- 科室管理（仅超管） -->
+      <template v-else-if="tab === 'departments'">
+        <h2>科室管理</h2>
+        <p class="hint">
+          科室是全院主数据：登录选科、坐诊队列、资料库授权、统计口径都按它归类。
+          <strong>停用</strong>不会删除历史数据；<strong>删除</strong>只用于配错的脏数据。
+        </p>
+
+        <div class="form kbf">
+          <label><span>科室名称</span><input v-model="deptName" placeholder="如：皮肤科" /></label>
+          <label><span>排序（小的在前）</span><input v-model.number="deptSort" type="number" placeholder="100" /></label>
+          <div class="save-row">
+            <button class="primary" :disabled="deptBusy || !deptName.trim()" @click="createDept">新增科室</button>
+            <span v-if="deptMsg" class="save-msg" :class="{ bad: deptBad }">{{ deptMsg }}</span>
+          </div>
+        </div>
+
+        <table>
+          <thead><tr><th>科室</th><th>排序</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="d in deptRows" :key="d.id">
+              <td>{{ d.name }}</td>
+              <td>{{ d.sortOrder }}</td>
+              <td>
+                <span class="badge" :class="d.active ? 'ok' : 'warn'">{{ d.active ? '启用' : '停用' }}</span>
+              </td>
+              <td class="ops">
+                <button class="ghost" @click="toggleDept(d)">{{ d.active ? '停用' : '启用' }}</button>
+                <button class="ghost danger" @click="removeDept(d)">删除</button>
+              </td>
+            </tr>
+            <tr v-if="!deptRows.length"><td colspan="4" class="empty">暂无科室</td></tr>
+          </tbody>
+        </table>
+      </template>
+
       <!-- 对接设置 -->
       <template v-else>
         <h2>对接设置</h2>
@@ -318,19 +444,34 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
-import { api, type AdminConfigView, type DesiredConfig, type IdentityView, type KbDoc, type KbCandidate, type KbPoolVersion } from '../api'
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { api, type AdminConfigView, type DesiredConfig, type IdentityView, type KbDoc, type KbCandidate, type KbPoolVersion, type ChatSession, type ChatMessage } from '../api'
 import { ensureIdentity } from '../identity'
 
-const tabs = [
+/**
+ * ★ 标签按角色裁剪（不是全员同一套）：
+ *   · 对接设置：仅超管（决定患者数据是否出网，医护后台不需要，也不该看到）；
+ *   · 科室管理：仅超管（全院主数据，改名/停用影响历史归类与统计口径）；
+ *   · 审核台：超管 + 科室管理员（医护看候选列表会 403）。
+ * 隐藏只是体验，服务端 SecurityConfig 仍独立拒绝。
+ */
+const ALL_TABS = [
   { id: 'patients', name: '患者情况' },
+  { id: 'clinic', name: '坐诊' },
   { id: 'kb', name: '资料库' },
   { id: 'review', name: '审核台' },
   { id: 'stats', name: '统计' },
   { id: 'audit', name: '审计' },
+  { id: 'departments', name: '科室管理' },
   { id: 'config', name: '对接设置' },
 ]
 const tab = ref('patients')
+const tabs = computed(() => ALL_TABS.filter((t) => {
+  if (t.id === 'config') return canWriteConfig.value
+  if (t.id === 'departments') return canManageDepartments.value
+  if (t.id === 'review') return canWriteKb.value || me.value?.role === 'DEPT_ADMIN'
+  return true
+}))
 
 // ★ 全部从业务层真实接口拉取（dev 档由 DemoDataSeeder 灌入演示数据）。
 interface PatientRow { ref: string; name: string; allergy: string; chronic: string; encounterCount: number; last: string; dept: string; urgency: string }
@@ -343,6 +484,7 @@ const statsNote = ref('')
 const me = ref<IdentityView | null>(null)
 const canWriteKb = computed(() => !!me.value?.canWriteKb)
 const canWriteConfig = computed(() => !!me.value?.canWriteConfig)
+const canManageDepartments = computed(() => !!me.value?.canManageDepartments)
 interface AuditRow {
   id: number
   time: string
@@ -719,8 +861,184 @@ async function load() {
   } finally {
     loading.value = false
   }
-  await Promise.all([loadConfig(), loadKb(), loadCandidates(), loadPoolVersion()])
+  // ★ 按权限只拉该角色能读的：未授权接口会 403，拉回来只会制造"页面到处是错"的假象。
+  const jobs: Promise<unknown>[] = [loadQueue(), loadDepartments()]
+  if (canWriteConfig.value) jobs.push(loadConfig())
+  if (canWriteKb.value || me.value?.role === 'DEPT_ADMIN') {
+    jobs.push(loadKb(), loadCandidates(), loadPoolVersion())
+  }
+  await Promise.all(jobs)
 }
+
+// ── 坐诊台：队列 + 双向消息（增量轮询，2s）
+//  ★ 用 afterId 增量拉取而不是每次全量：轮询既要"不漏消息"也要"不重复渲染"。
+//    2s 是体感与请求量的折中；接口形状与 SSE/WS 一致，将来换传输层不用改数据模型。
+const queue = ref<ChatSession[]>([])
+const activeChat = ref<ChatSession | null>(null)
+const chatMsgs = ref<ChatMessage[]>([])
+const chatDraft = ref('')
+const chatErr = ref('')
+const chatBox = ref<HTMLElement | null>(null)
+const closePanel = ref(false)
+const closeAssessment = ref('')
+const closePlan = ref('')
+const chatBusy = ref(false)
+
+async function loadQueue() {
+  if (!me.value?.clinicalSide) return
+  try {
+    queue.value = await api.chatQueue()
+    if (activeChat.value) {
+      const fresh = queue.value.find((x) => x.id === activeChat.value!.id)
+      if (fresh) activeChat.value = fresh
+    }
+  } catch (e) {
+    chatErr.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function openSession(s: ChatSession) {
+  activeChat.value = s
+  chatMsgs.value = []
+  closePanel.value = false
+  chatErr.value = ''
+  await pullMessages(true)
+}
+
+async function pullMessages(reset = false) {
+  const s = activeChat.value
+  if (!s) return
+  const after = reset ? 0 : (chatMsgs.value.length ? chatMsgs.value[chatMsgs.value.length - 1].id : 0)
+  try {
+    const rows = await api.chatMessages(s.id, after)
+    if (rows.length) {
+      chatMsgs.value = after === 0 ? rows : chatMsgs.value.concat(rows)
+      await nextTick()
+      if (chatBox.value) chatBox.value.scrollTop = chatBox.value.scrollHeight
+    }
+  } catch (e) {
+    chatErr.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function takeSession() {
+  if (!activeChat.value) return
+  try {
+    activeChat.value = await api.chatTake(activeChat.value.id)
+    await Promise.all([pullMessages(true), loadQueue()])
+  } catch (e) {
+    chatErr.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function sendChat() {
+  const s = activeChat.value
+  const body = chatDraft.value.trim()
+  if (!s || !body || chatBusy.value) return
+  chatBusy.value = true
+  try {
+    const m = await api.chatSend(s.id, body)
+    chatMsgs.value.push(m)
+    chatDraft.value = ''
+    await nextTick()
+    if (chatBox.value) chatBox.value.scrollTop = chatBox.value.scrollHeight
+  } catch (e) {
+    chatErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    chatBusy.value = false
+  }
+}
+
+async function doClose() {
+  if (!activeChat.value) return
+  try {
+    const r = await api.chatClose(activeChat.value.id, closeAssessment.value, closePlan.value)
+    closePanel.value = false
+    closeAssessment.value = ''
+    closePlan.value = ''
+    activeChat.value = r.session
+    chatErr.value = ''
+    // 结束后会多一条就诊，患者列表要跟着更新（否则"结束"看起来什么都没发生）
+    patients.value = (await api.adminPatients()) as PatientRow[]
+    await loadQueue()
+  } catch (e) {
+    chatErr.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+// ── 科室管理（仅超管）
+const deptRows = ref<{ id: number; name: string; active: boolean; sortOrder: number }[]>([])
+const deptName = ref('')
+const deptSort = ref(100)
+const deptMsg = ref('')
+const deptBad = ref(false)
+const deptBusy = ref(false)
+
+async function loadDepartments() {
+  if (!canManageDepartments.value) return
+  try {
+    deptRows.value = await api.adminDepartments()
+  } catch (e) {
+    deptBad.value = true
+    deptMsg.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function createDept() {
+  if (deptBusy.value || !deptName.value.trim()) return
+  deptBusy.value = true
+  try {
+    await api.adminDeptCreate(deptName.value.trim(), deptSort.value || 100)
+    deptBad.value = false
+    deptMsg.value = '已新增：' + deptName.value.trim()
+    deptName.value = ''
+    await loadDepartments()
+  } catch (e) {
+    deptBad.value = true
+    deptMsg.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    deptBusy.value = false
+  }
+}
+
+async function toggleDept(d: { id: number; name: string; active: boolean; sortOrder: number }) {
+  try {
+    await api.adminDeptUpdate(d.id, { active: !d.active })
+    deptBad.value = false
+    deptMsg.value = (d.active ? '已停用：' : '已启用：') + d.name
+    await loadDepartments()
+  } catch (e) {
+    deptBad.value = true
+    deptMsg.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function removeDept(d: { id: number; name: string; active: boolean; sortOrder: number }) {
+  if (!window.confirm('删除科室「' + d.name + '」？历史数据不会删，但该科室将从选择列表消失。\n如需保留历史归类，请改用「停用」。')) {
+    return
+  }
+  try {
+    await api.adminDeptDelete(d.id)
+    deptBad.value = false
+    deptMsg.value = '已删除：' + d.name
+    await loadDepartments()
+  } catch (e) {
+    deptBad.value = true
+    deptMsg.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+let chatTimer: number | undefined
+onMounted(() => {
+  chatTimer = window.setInterval(() => {
+    if (tab.value !== 'clinic') return
+    loadQueue()
+    if (activeChat.value) pullMessages()
+  }, 2000)
+})
+onBeforeUnmount(() => {
+  if (chatTimer) window.clearInterval(chatTimer)
+})
 
 onMounted(load)
 </script>
@@ -852,4 +1170,56 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
 .pool-actions button { padding: 7px 14px; font-size: 13px; border-radius: 7px; border: 1px solid var(--line-strong); background: #fff; cursor: pointer; }
 .pool-actions button.primary { border: 0; background: var(--primary); color: #fff; }
 .pool-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── 坐诊台 ── */
+.clinic {
+  display: grid; grid-template-columns: 280px 1fr; gap: 14px;
+  height: calc(100vh - 210px); min-height: 420px;
+}
+.cq {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+  padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
+}
+.cq-h { font-size: 12px; color: var(--text-3); margin-bottom: 4px; }
+.cq-item {
+  text-align: left; border: 1px solid var(--line); background: #fff; border-radius: 8px;
+  padding: 8px 10px; cursor: pointer; display: flex; flex-direction: column; gap: 3px;
+}
+.cq-item:hover { border-color: var(--primary); }
+.cq-item.on { border-color: var(--primary); background: #eef4f6; }
+.cq-top { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+.cq-sub {
+  font-size: 12px; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cq-sub.muted { color: var(--text-3); }
+.warnb { color: #b45309; font-style: normal; font-size: 11px; }
+.okb { color: #047857; font-style: normal; font-size: 11px; }
+
+.chat {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.chat-h {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+.chat-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.msg { display: flex; flex-direction: column; max-width: 78%; }
+.msg.patient { align-self: flex-start; }
+.msg.doctor { align-self: flex-end; align-items: flex-end; }
+.msg.system { align-self: center; align-items: center; max-width: 92%; }
+.bubble {
+  padding: 8px 11px; border-radius: 10px; background: #f2f4f6;
+  font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+.msg.doctor .bubble { background: var(--primary); color: #fff; }
+.msg.system .bubble {
+  background: transparent; border: 1px dashed var(--line-strong);
+  color: var(--text-3); font-size: 12px;
+}
+.mmeta { font-size: 11px; color: var(--text-3); margin-top: 3px; }
+.chat-in { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+.chat-in input { flex: 1; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; }
+.closebox { border-top: 1px solid var(--line); padding: 10px 12px; background: #fafbfc; }
 </style>

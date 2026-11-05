@@ -24,6 +24,16 @@
         <input v-model="password" type="password" placeholder="密码" @keyup.enter="submit" />
       </label>
 
+      <!-- ★ 坐诊科室：医护 / 科室管理员**必选**。选项来自总后台维护的启用科室，
+           不是前端写死的列表 —— 写死会出现"后台改名了、登录页还是旧名字"的静默错配。 -->
+      <label v-if="needDepartment">
+        <span>坐诊科室（必选）</span>
+        <select v-model="department">
+          <option value="" disabled>请选择科室</option>
+          <option v-for="d in departments" :key="d" :value="d">{{ d }}</option>
+        </select>
+      </label>
+
       <p v-if="demoItems.length" class="demo">
         <span>该入口演示账号：</span>
         <button
@@ -45,7 +55,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, setToken } from '../api'
 import { ensureIdentity, landingFor } from '../identity'
@@ -56,6 +66,16 @@ const username = ref('')
 const password = ref('')
 const busy = ref(false)
 const error = ref('')
+
+/**
+ * 坐诊科室。
+ *
+ * ★ 只有医护 / 科室管理员需要选择：这是"本次坐诊在哪个科室"，
+ *   不是永久属性（同一位医生可能轮转）。患者与超管不显示。
+ */
+const departments = ref<string[]>([])
+const department = ref('')
+const needDepartment = computed(() => roleGroup.value === 'clinical')
 
 /**
  * ★ 角色分区：仅用于把演示账号入口按「患者端 / 医护端 / 管理端」分流展示，
@@ -100,18 +120,38 @@ const DEMO: { user: string; label: string; group: 'patient' | 'clinical' | 'admi
 
 const demoItems = computed(() => DEMO.filter((d) => d.group === roleGroup.value))
 
+onMounted(async () => {
+  try {
+    departments.value = await api.departmentsPublic()
+  } catch {
+    // 登录页不因科室接口失败而卡死：医护人员会看到"请选择科室"且无选项，
+    // 提交时由服务端给出明确错误（比静默用默认科室安全）。
+  }
+})
+
 function fill(user: string) {
   username.value = user
   password.value = import.meta.env.DEV ? '123456' : ''
   error.value = ''
+  // 演示账号直接带出常用科室，减少手点；仍可改
+  if (user === 'doctor' || user === 'deptadmin') {
+    department.value = departments.value.includes('发热门诊')
+      ? '发热门诊'
+      : (departments.value[0] || '')
+  }
 }
 
 async function submit() {
   if (busy.value) return
+  if (needDepartment.value && !department.value) {
+    error.value = '请选择坐诊科室'
+    return
+  }
   busy.value = true
   error.value = ''
   try {
-    const r = await api.login(username.value, password.value)
+    const r = await api.login(username.value, password.value,
+      needDepartment.value ? department.value : undefined)
     setToken(r.token)
     // 先取回身份（带 patientRef / 科室），再由**服务端返回的角色**决定落到哪个工作区
     const id = await ensureIdentity(true)
@@ -154,6 +194,11 @@ input[type='text'], input[type='password'], input:not([type]) {
   width: 100%; padding: 9px 11px; border: 1px solid var(--line-strong);
   border-radius: 8px; background: #fff; outline: none;
 }
+select {
+  width: 100%; padding: 9px 11px; border: 1px solid var(--line-strong);
+  border-radius: 8px; background: #fff; outline: none; color: var(--text);
+}
+select:focus { border-color: var(--primary); }
 input:focus { border-color: var(--primary); }
 .demo {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;

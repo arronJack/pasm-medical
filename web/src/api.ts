@@ -101,6 +101,8 @@ export interface IdentityView {
   /** 仅供界面禁用按钮；服务端会独立拒绝，不能只靠隐藏 */
   canWriteKb: boolean
   canWriteConfig: boolean
+  /** 科室主数据管理（仅超管）：决定「科室管理」入口是否出现 */
+  canManageDepartments: boolean
 }
 
 const TOKEN_KEY = 'pasm_token'
@@ -138,10 +140,58 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  login: (username: string, password: string) =>
+  /** 登录。`department` 仅医护/科室管理员需要（本次坐诊科室，必须在总后台启用）。 */
+  login: (username: string, password: string, department?: string) =>
     call<IdentityView & { token: string }>('/auth/login', {
-      method: 'POST', body: JSON.stringify({ username, password }),
+      method: 'POST', body: JSON.stringify({ username, password, department }),
     }),
+
+  /** 登录页科室下拉（匿名可读）：只返回启用中的科室名称。 */
+  departmentsPublic: () => call<string[]>('/departments/public'),
+
+  // ── 科室主数据（超管）──
+  adminDepartments: () =>
+    call<{ id: number; name: string; active: boolean; sortOrder: number }[]>('/admin/departments'),
+  adminDeptCreate: (name: string, sortOrder?: number) =>
+    call<{ id: number; name: string; active: boolean; sortOrder: number }>('/admin/departments', {
+      method: 'POST', body: JSON.stringify({ name, sortOrder }),
+    }),
+  adminDeptUpdate: (id: number, body: { name?: string; active?: boolean; sortOrder?: number }) =>
+    call<{ id: number; name: string; active: boolean; sortOrder: number }>(
+      '/admin/departments/' + id, { method: 'PATCH', body: JSON.stringify(body) }),
+  adminDeptDelete: (id: number) =>
+    call<{ ok: boolean }>('/admin/departments/' + id, { method: 'DELETE' }),
+
+  // ── 人工坐诊 ──
+  /** 患者请求转人工（幂等：已有进行中会话直接返回）。 */
+  chatHandoff: (body: { patientRef?: string; department: string; chiefComplaint?: string; urgency?: string }) =>
+    call<ChatSession>('/chat/handoff', { method: 'POST', body: JSON.stringify(body) }),
+  /** 患者当前进行中的会话（没有则 null）。 */
+  chatMy: async (): Promise<ChatSession | null> => {
+    const t = getToken()
+    const r = await fetch('/api/chat/my', { headers: t ? { Authorization: 'Bearer ' + t } : {} })
+    if (r.status === 204) return null
+    if (r.status === 401) { clearToken(); throw new Error('登录已失效，请重新登录') }
+    if (r.status === 403) throw new Error('没有权限')
+    if (!r.ok) throw new Error(String(r.status))
+    return r.json() as Promise<ChatSession>
+  },
+  /** 坐诊队列（科室范围；超管全院）。 */
+  chatQueue: () => call<ChatSession[]>('/chat/queue'),
+  chatTake: (id: number) => call<ChatSession>('/chat/' + id + '/take', { method: 'POST' }),
+  /** 增量拉取：afterId 之后的新消息。 */
+  chatMessages: (id: number, afterId = 0) =>
+    call<ChatMessage[]>('/chat/' + id + '/messages?afterId=' + afterId),
+  chatSend: (id: number, body: string) =>
+    call<ChatMessage>('/chat/' + id + '/messages', {
+      method: 'POST', body: JSON.stringify({ body }),
+    }),
+  /** 结束会话并落就诊；可带医师判断/处置（会进入 Encounter，供自学习抽取）。 */
+  chatClose: (id: number, assessment?: string, plan?: string) =>
+    call<{ session: ChatSession; encounterId: number | null; alreadyClosed: boolean }>(
+      '/chat/' + id + '/close', {
+        method: 'POST', body: JSON.stringify({ assessment, plan }),
+      }),
 
   /** 当前身份。路由守卫与顶栏都用它，别把登录响应缓存下来当身份用。 */
   me: () => call<IdentityView>('/auth/me'),
@@ -374,8 +424,31 @@ export interface AdminConfigView {
   note?: string
 }
 
-export interface ConsultQuestion { key: string; text: string; why: string; from_tree: string }
-export interface Triage { urgency: string; advice: string; suggested_department?: string }
+/** 人工坐诊会话。状态：WAITING 等待接诊 / HUMAN 人工中 / CLOSED 已结束。 */
+export interface ChatSession {
+  id: number
+  patientRef: string
+  department: string
+  status: 'WAITING' | 'HUMAN' | 'CLOSED'
+  chiefComplaint: string
+  urgency: string
+  assignedStaff: string
+  assignedName: string
+  lastMessage: string
+  createdAt: string
+  updatedAt: string
+  lastMessageAt: string
+}
+
+export interface ChatMessage {
+  id: number
+  sender: 'PATIENT' | 'DOCTOR' | 'SYSTEM'
+  senderName: string
+  body: string
+  createdAt: string
+}
+
+export interface ConsultQuestion { key: string; text: string; why: string; from_tree: string }export interface Triage { urgency: string; advice: string; suggested_department?: string }
 export interface TriageCandidates {
   ok: boolean
   chief_complaint: string

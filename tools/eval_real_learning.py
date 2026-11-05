@@ -397,7 +397,7 @@ def main() -> int:
         _, token = login(base)
         check("超管 staff 登录成功", bool(token))
         st, d = req("POST", base + "/api/auth/login",
-                    {"username": "deptadmin", "password": "123456"})
+                    {"username": "deptadmin", "password": "123456", "department": "发热门诊"})
         dept_token = d.get("token") or ""
         check("科室管理员 deptadmin 登录成功", st == 200 and bool(dept_token))
 

@@ -436,7 +436,12 @@ java -jar target/pasm-medical-backend-0.1.0.jar \
 | `PATIENT` | `patientRef` | **本人**（`ref` 由身份决定，请求参数只是「申请」） | — |
 | `DOCTOR` | `department` / `staffId` | **本科室**（聚合视图：患者列表 / 统计 / 审计）；个体档案可跨科查阅、逐次留痕 | — |
 | `DEPT_ADMIN` | `department` / `staffId` | 同上 | **本科室资料库**（P1-2） |
-| `SUPER_ADMIN` | — | 全院 | 对接设置 + 资料库（全院通用 + 各科室） |
+| `SUPER_ADMIN` | — | 全院 | 对接设置 + **科室管理** + 资料库（全院通用 + 各科室） |
+
+> ★ **医护 / 科室管理员的 `department` 由登录时选择**（`POST /api/auth/login` 的
+> `department` 字段），不是永久属性 —— 同一位医生可能轮转到不同科室。选择必须落在
+> 总后台维护且**启用中**的科室；缺省或不存在 → `400`，不会默认成某个科室。
+> 患者与超管不需要（也不应）传该字段。
 
 > ⚠️ **「本科室」限定的是聚合视图，不是个体查档** —— 这条边界必须写清楚，否则会被误改。
 > 临床侧（`DOCTOR` / `DEPT_ADMIN`）对 `/api/patient`、`/api/patient/encounters`、

@@ -95,9 +95,9 @@ class CandidatePostgresTest {
         v.setValue("1");
         configs.save(v);
 
-        superToken = tokens.login("staff", "123456").token();
-        deptToken = tokens.login("deptadmin", "123456").token();
-        doctorToken = tokens.login("doctor", "123456").token();
+        superToken = tokens.login("staff", "123456", null).token();
+        deptToken = tokens.login("deptadmin", "123456", "发热门诊").token();
+        doctorToken = tokens.login("doctor", "123456", "发热门诊").token();
     }
 
     private static MockHttpServletRequestBuilder auth(MockHttpServletRequestBuilder b, String token) {
