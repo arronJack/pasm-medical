@@ -434,9 +434,17 @@ java -jar target/pasm-medical-backend-0.1.0.jar \
 | 角色 | 关键字段 | 数据范围 | 可写 |
 |---|---|---|---|
 | `PATIENT` | `patientRef` | **本人**（`ref` 由身份决定，请求参数只是「申请」） | — |
-| `DOCTOR` | `department` / `staffId` | 本科室 | — |
-| `DEPT_ADMIN` | `department` / `staffId` | 本科室 | **本科室资料库**（P1-2） |
+| `DOCTOR` | `department` / `staffId` | **本科室**（聚合视图：患者列表 / 统计 / 审计）；个体档案可跨科查阅、逐次留痕 | — |
+| `DEPT_ADMIN` | `department` / `staffId` | 同上 | **本科室资料库**（P1-2） |
 | `SUPER_ADMIN` | — | 全院 | 对接设置 + 资料库（全院通用 + 各科室） |
+
+> ⚠️ **「本科室」限定的是聚合视图，不是个体查档** —— 这条边界必须写清楚，否则会被误改。
+> 临床侧（`DOCTOR` / `DEPT_ADMIN`）对 `/api/patient`、`/api/patient/encounters`、
+> `/api/patient/encounter/{id}`、`/api/assist/context` 等**个体档案**接口**允许任意 `ref`**
+> （`scopedRef` 放行），因为跨科查档是临床安全需要（患者昏迷、跨科会诊）；
+> 每一次读取都会落审计（`recordRead`），谁在什么时候看了谁可回溯。
+> 把这类接口也收窄成 `403` 会直接破坏临床查档，`e2e_stack` 有断言把该决策钉死。
+> **患者侧例外**：`PATIENT` 仍严格限本人，换个 `ref` 一律 `403`。
 
 **两条判定分工**（`SecurityConfig` 只能做第一条，第二条必须写在接口里）：
 
