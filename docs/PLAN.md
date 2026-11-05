@@ -1,20 +1,20 @@
 # 医院智能诊疗辅助系统 · 开发方案与框架设计
 
-> 版本：v0.1（2026-09-21），实现进度更新于 2026-11-04
+> 版本：v0.1（2026-09-21），实现进度更新于 2026-11-05
 
 ---
 
 ## ⚠️ 阅读须知：本文是「设计目标 + 路线图」，不是当前已实现状态
 
 - 当前已落地的是 **MVP**（验证过、能跑），真实能力见 [README「现状与后续」](README.md#现状与后续)。
-- 设计稿中的 **pgvector / MinIO / Redis / SSE 流式** 在 MVP 中**尚未落地** —— 属于目标，不是现状；**自学习闭环中的「审核台 + 候选池 + 版本回滚」已于 2026-11-04 前移落地**（每日批处理默认关闭，待评测后开启），见下文与 [README「现状与后续」](../README.md#现状与后续)。
+- 设计稿中的 **pgvector / MinIO / Redis / SSE 流式** 在 MVP 中**尚未落地** —— 属于目标，不是现状；**自学习闭环中的「审核台 + 候选池 + 版本回滚」已于 2026-11-04 前移落地**（**每日批处理默认关闭**；2026-11-05 已完成一轮真实就诊数据评测（71 项全绿，见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)）；生产仍保持关闭，原因见 §8.4），见下文与 [README「现状与后续」](../README.md#现状与后续)。
   PostgreSQL **已落地**：生产表结构由 Flyway 版本化迁移管理（`db/migration/V1__init.sql`、`V2__lab_results.sql`），
   dev(H2) 与生产共用同一份脚本；见 [DB-MIGRATION.md](DB-MIGRATION.md)。
   **LIS/HL7/FHIR 对接已落地**（HL7 ORU / FHIR Observation 投递 + FHIR 只读投影，
   见 [INTEGRATION-LIS-FHIR.md](INTEGRATION-LIS-FHIR.md)）；但 **MLLP TCP 监听、HL7 ACK 报文、
   LOINC/SNOMED 映射** 仍未实现 —— 边界以该文档第 7 节为准。
   审核台（human-in-the-loop 自学习出口）+ 候选池 + 知识池版本回滚 **已于 2026-11-04 前移落地**（原属 P3）：
-  见 `KbCandidateService` / `CandidateReviewController` / `db/migration/V3__kb_candidates.sql`；每日批处理默认关闭（环境变量 `MEDICAL_LEARNING_AUTO` 开启）。
+  见 `KbCandidateService` / `CandidateReviewController` / `db/migration/V3__kb_candidates.sql`；每日批处理默认关闭（环境变量 `MEDICAL_LEARNING_AUTO` 开启）；**2026-11-05 真实数据评测结论见 `docs/REAL-LEARNING-EVAL.md`**（71 项全绿，同时修掉「真实问诊落库空壳」与「复合科室授权错配」两处真缺陷）。
   认知服务的**跨请求会话**已抽出可插拔 `SessionStore`（默认 memory / CLI 默认 file），
   单机多 worker 与重启不再丢会话；**多主机**水平扩容仍需接 Redis/DB 实现（协议已就位）。
 - 下文凡标注「（目标）」的，均为 MVP 暂未落地的设计。
@@ -27,7 +27,7 @@
 | 数据标准 | FHIR | **FHIR R4 只读投影已落地**（Patient/Encounter/Observation）；写入只支持 Observation，无 LOINC 映射 |
 | 认知服务 | 无状态、可水平扩容 | 跨请求会话已抽出 `SessionStore`（file 存储：单机多 worker / 重启不丢）；多主机需接 Redis/DB |
 | 前端流式 | SSE | 非流式（一次性响应） |
-| 自学习闭环 | 每日批处理 + 候选池 + 审核台 | **审核台 + 候选池 + 版本回滚已前移落地（P3 内容，2026-11-04）**；每日批处理默认关闭，待评测后开启 |
+| 自学习闭环 | 每日批处理 + 候选池 + 审核台 | **审核台 + 候选池 + 版本回滚已前移落地（P3 内容，2026-11-04）**；**每日批处理默认关闭**；2026-11-05 已完成一轮真实就诊数据评测（71 项全绿，见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)）；生产仍保持关闭，原因见 §8.4 |
 | 工程结构 | 多模块（domain/service/cognition…） | 单模块 `backend/src/main/java/com/pasm/medical` + `web/` + `pasm_medical/` |
 
 ---
@@ -61,8 +61,8 @@
   机器通道用**独立共享密钥**（`MEDICAL_LIS_TOKEN`，未配置即关闭），与用户 JWT 分离。
   验证：HL7 解析单测 10 项 + 真 PostgreSQL 集成 9 项（含无令牌 401、坏消息 400 不落库、
   未知患者 422、重发幂等、跨患者同 id 冲突）。
-- **三端联调 `tools/e2e_stack.py` 全过**（74 项，含越权/非法输入反例；
-  P1-1/P1-2 共 12 项判据已做反向验证：故意改坏 → 恰好对应条数转红 → 还原后 74/74）。
+- **三端联调 `tools/e2e_stack.py` 全过**（81 项，含越权/非法输入反例；
+  P1-1/P1-2 共 12 项判据已做反向验证：故意改坏 → 恰好对应条数转红 → 还原后 81/81）。
 - **P1-2 科室实体 + 本科室资源**：资料库引入**科室维度**（`KnowledgeDoc.department`，
   空 = 全院通用），科室管理员只**能管本科室**资料（新建强制本科室、跨科室/全院通用→403、
   列表仅本科室），与医护拉开首个真实能力差异。顺带修掉一个误导性缺陷：请求体畸形时
@@ -340,6 +340,39 @@ GET  /api/cog/status       后端可用性 / 规模 / 版本
 > **反例**：直接拿"历史诊断"当标签训练，学到的其实是**这家医院的诊断习惯**
 > （包括它的系统性偏差）。必须有独立金标准（专家复核过的评测集），
 > 才能判断"到底有没有变好"。
+### 8.4 ★ 2026-11-05 真实就诊数据评测结论（已落地，不是设计目标）
+
+用 `MEDICAL_LEARNING_AUTO=true` 起后端，5 例合成主诉全程走
+`/api/consult/start → answer → finish` 真实链路，`tools/eval_real_learning.py`
+跑出 **71 项核验全绿**（另有一个「不带环境变量」的对照后端硬证默认关闭），
+完整报告见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)。
+评测暴露并修掉两处**只有真实数据**才能发现的缺陷：
+
+1. **真实问诊落库是空壳**：认知侧《预问诊摘要》返回 `chief_complaint` /
+   `present_illness` / `triage.suggested_department`，且按合规**不含**
+   `assessment` / `plan`；旧 Java 落库读驼峰 `chiefComplaint` 等 → 全为 null，
+   候选池 `title.isEmpty() → continue`，修复前真实数据恒产出 **0 条**候选。
+   `DemoDataSeeder` 手工填齐字段，既有 74 项联调因此一直假绿。
+   现按真实响应对齐字段名、补 `department`，`summaryText` 由 `summaryOf`
+   构造去标识化结构化摘要（不编造结论、不存原始对话）；并在 `e2e_stack.py`
+   补 **7 项真实链路落库回归断言**（74 → **81 项**），以后再退化会被抓到。
+2. **复合科室授权错配**：`triage.suggested_department` 是 `发热门诊 / 感染科`，
+   而 `Identity.department` 是 `发热门诊`；`KbCandidateService.list` 用精确
+   `equals` 收窄 → 科室管理员对真实候选可见 **0 条**。现业务层落库取主科室
+   （第一段）用于授权归类，完整建议仍原样保留在摘要里；分诊规则本身仍在
+   认知侧，Java 不重写（薄转发铁律）。
+
+另如实标注一条**未改**：红旗中断时 `triage()` 只返回 `urgency/advice/reason`，
+不含 `suggested_department`，故该路径 `department` 为空、候选按设计仅超管可见。
+
+★ **仍未解决（不得假装修好）**：预问诊摘要按合规不含医师结论，本轮候选正文实际是
+「患者自述 + 分诊建议」，**不具备作为机构回答依据的资格**。已给这类候选加
+`【预问诊采集·非医师结论，不得作为诊疗依据】` 护栏（不放进 tags，避免给相关性闸门
+新增可命中词），但根治必须补「医师确认后的判断 / 处置」采集链路（P3）。
+在此之前 `MEDICAL_LEARNING_AUTO` 于生产必须保持关闭；审核台的人工闸门是最后一道
+防线（本轮已核验：候选绝不自动写 `knowledge_docs`，采纳才入库 + 版本 +1，驳回不入库）。
+
+
 
 ---
 
@@ -397,7 +430,7 @@ GET  /api/cog/status       后端可用性 / 规模 / 版本
 | **P0**（2–3 周） | 打通链路 | 认知 HTTP API + Spring Boot 骨架 + Vue 骨架 + Java SDK 联调 | 低 |
 | **P1**（4–6 周） | 医生助手 MVP | 患者 / 就诊 / 病历 CRUD + 聊天 + 知识库检索 + 审计 | 低 |
 | **P2**（4–6 周） | 认知能力 | 记忆分层 + 患者隔离 + 情绪共情 + 采纳反馈闭环 | 中 |
-| **P3**（6–8 周） | 自学习 | 每日批处理 + 候选池 + 审核台 + 版本回滚（**审核台 + 候选池 + 版本回滚已于 2026-11-04 前移落地**；每日批处理默认关闭） | 中高 |
+| **P3**（6–8 周） | 自学习 | 每日批处理 + 候选池 + 审核台 + 版本回滚（**审核台 + 候选池 + 版本回滚已于 2026-11-04 前移落地**；每日批处理默认关闭；2026-11-05 已做真实数据评测，生产仍保持关闭） | 中高 |
 | **P5**（4 周） | 中医库 | 术语映射 + 检索 + 配伍禁忌硬规则 | 中 |
 | **P4**（8–12 周） | 多模态 | 语音录入 → 情绪 → 面部体征（仅提示） | **高** |
 | **平行** | 合规 | 回顾性评测、伦理审批、等保、分类界定 | 高 |

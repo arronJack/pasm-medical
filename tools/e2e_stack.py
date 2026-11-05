@@ -420,6 +420,42 @@ def main() -> int:                                # noqa: C901
                     token=token)
         check("★ 反例：就诊归属不符 → 404（挡住 IDOR）", st == 404, str(st) + " " + str(d)[:120])
 
+        # ---------- 8b) ★★ 真实链路落库回归（专门防「演示数据假绿」）
+        #   上面 8) 验的是 DemoDataSeeder 手工填齐字段的演示就诊。曾经的真缺陷：
+        #   认知侧《预问诊摘要》返回 chief_complaint / present_illness /
+        #   triage.suggested_department，且按合规不含 assessment / plan；
+        #   旧 Java 落库读驼峰 chiefComplaint/assessment/plan → 真实 finish 落库成「空壳」，
+        #   自学习候选池一条都抽不出来 —— 而演示数据让 8) 一直全绿。
+        #   ★ 这组断言必须用真实 start→answer→finish 产生的数据，绝不能用演示患者。
+        #   放在统计断言之后：consult-start 会增加一次审计，别让前面的口径断言漂移。
+        real_ref = "stack-real-encounter"
+        st, d = req("POST", base + "/api/consult/start",
+                    {"patientRef": real_ref, "chiefComplaint": "咳嗽三天"}, token=token)
+        check("真实链路 start 成功（落库回归的前提）",
+              st == 200 and bool(d.get("question")), str(d)[:160])
+        req("POST", base + "/api/consult/answer",
+            {"patientRef": real_ref, "sessionKey": "current", "value": "三天前"}, token=token)
+        st, fin = req("POST", base + "/api/consult/finish",
+                      {"patientRef": real_ref, "sessionKey": "current"}, token=token)
+        check("真实链路 finish 产出《预问诊摘要》（chief_complaint 非空）",
+              st == 200 and fin.get("ok") is True and bool(fin.get("chief_complaint")),
+              str(fin)[:180])
+        st, real_encs = req("GET", base + "/api/patient/encounters?ref=" + real_ref, token=token)
+        row = real_encs[0] if isinstance(real_encs, list) and real_encs else {}
+        check("★★ 真实就诊落库：标题非空（修复前退化成兜底「就诊记录」）",
+              bool(row.get("title")) and row.get("title") != "就诊记录", str(row)[:180])
+        check("★★ 真实就诊落库：去标识化摘要非空且含「主诉：」",
+              bool(row.get("summary")) and "主诉：" in row["summary"], str(row)[:180])
+        st, det = req("GET", base + "/api/patient/encounter/%s?ref=%s"
+                      % (row.get("id"), real_ref), token=token)
+        check("★★ 真实就诊详情：chiefComplaint 非空",
+              bool(det.get("chiefComplaint")), str(det)[:180])
+        check("★★ 真实就诊详情：department 为单科室（按科室授权口径）",
+              bool(det.get("department")) and "/" not in str(det.get("department")),
+              str(det.get("department")))
+        check("★ 合规：真实预问诊不出诊断结论（assessment / plan 为空）",
+              not det.get("assessment") and not det.get("plan"), str(det)[:180])
+
         # ---------- 9) 对接设置：真实读写 + 校验 + 与认知服务对账
         st, d = req("GET", base + "/api/admin/config", token=token)
         check("★ /api/admin/config 可读（返回期望值 + 认知服务实际值）",

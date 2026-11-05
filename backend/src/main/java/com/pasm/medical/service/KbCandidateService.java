@@ -123,6 +123,15 @@ public class KbCandidateService {
                 continue; // 没有任何可沉淀内容，跳过
             }
             String content = body.toString();
+            // ★ 合规护栏（2026-11-05 真实数据评测发现）：预问诊摘要按设计**不含医师结论**
+            //   （assessment / plan 恒为空），此时"可沉淀内容"实际是患者自述 + 分诊建议。
+            //   若审核台误采纳，这类内容会变成机构的「回答依据」—— 等于把患者自述当医学结论。
+            //   让候选自带不可误读的警示，即使被采纳，检索命中时也能看到。
+            //   真正合格的自学习输入应是「医师确认后的判断/处置」，属 P3 待办；此处只做兜底标注。
+            //   ★ 不放进 tags：那会给相关性闸门新增可命中词，反而更容易被检索出来。
+            if (assessment.isEmpty() && plan.isEmpty()) {
+                content = "【预问诊采集·非医师结论，不得作为诊疗依据】" + content;
+            }
             String department = e.getDepartment() == null ? "" : e.getDepartment().trim();
             String tags = (department.isEmpty() ? "" : department + ",") + "经验";
             double confidence = 0.5
@@ -179,6 +188,9 @@ public class KbCandidateService {
         report.put("pendingTotal", candidates.countByStatus(KbCandidate.PENDING)
                 + candidates.countByStatus(KbCandidate.CONFLICT));
         report.put("ids", ids);
+        // ★ 把"每日自动批处理是否开启"随报告回传：运维能当场确认开关真的接上了，
+        //   而不是靠"我看我是设了环境变量"来猜。手动 /generate 本身不受这个开关限制。
+        report.put("autoGenerateEnabled", autoGenerate);
         return report;
     }
 

@@ -9,6 +9,8 @@ import com.pasm.medical.domain.Patient;
 import com.pasm.medical.service.AuditService;
 import com.pasm.medical.service.EncounterService;
 import com.pasm.medical.service.PatientService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -44,6 +46,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api")
 public class MedicalProxyController {
+
+    private static final Logger log = LoggerFactory.getLogger(MedicalProxyController.class);
 
     private final PasmCognitionClient cog;
     private final AuditService audit;
@@ -196,27 +200,46 @@ public class MedicalProxyController {
         }
         JsonNode r = cog.post("/api/consult/finish", forwardBody(body, ref));
         // 预问诊结束：落一次就诊到业务库（时间轴 / 后台的真实数据源）
+        //
+        // ★ 字段名按**认知侧真实响应**对齐，不要凭印象写驼峰：
+        //   Python《预问诊摘要》(consult.py summary()) 返回的是
+        //   chief_complaint / present_illness / triage.suggested_department，
+        //   且按合规**不含任何诊断结论**（没有 assessment / plan）。
+        //   旧代码读 chiefComplaint/assessment/plan 三个驼峰字段 → 真实链路上全为 null，
+        //   落库成"空壳就诊"：时间轴没主诉、自学习候选池一条都抽不出来。
+        //   演示数据由 DemoDataSeeder 手工填齐字段，所以既有联调一直全绿、没暴露这个断点。
         if (ref != null && !ref.isBlank()) {
             try {
                 Encounter e = new Encounter();
                 e.setPatientRef(ref);
                 e.setOccurredAt(Instant.now());
-                e.setChiefComplaint(r.path("chiefComplaint").asText(null));
-                e.setAssessment(r.path("assessment").asText(null));
-                e.setPlan(r.path("plan").asText(null));
+                e.setChiefComplaint(firstText(r, "chief_complaint", "chiefComplaint"));
+                // ★ 绝不凭空造"判断/处置"：预问诊不是诊断，编造结论是医疗合规红线。
+                //   仅当上游真的给了（例如将来接医师确认环节）才落库。
+                e.setAssessment(firstText(r, "assessment"));
+                e.setPlan(firstText(r, "plan"));
                 JsonNode triage = r.path("triage");
-                if (!triage.isMissingNode() && !triage.isNull()) {
-                    e.setTriageUrgency(triage.path("urgency").asText(null));
+                if (triage.isObject()) {
+                    e.setTriageUrgency(firstText(triage, "urgency"));
+                    // ★ 认知侧 suggested_department 是**复合建议**（如「发热门诊 / 感染科」），
+                    //   而业务库 department 用于「按科室授权」，口径是单科室
+                    //   （Identity.department =「发热门诊」）。若原样落库，
+                    //   KbCandidateService.list 的精确 equals 过滤会让科室管理员
+                    //   对真实链路产生的候选**一条都看不到**（本轮真实数据评测实测）。
+                    //   取主科室（第一段）只做数据范围归类，不改变分诊规则本身；
+                    //   完整建议文本仍由 summaryOf 原样写进摘要，医师看得到。
+                    String dept = firstText(triage, "suggested_department");
+                    if (dept != null) {
+                        String primary = dept.split("\\s*/\\s*")[0].trim();
+                        e.setDepartment(primary.isEmpty() ? null : primary);
+                    }
                 }
-                StringBuilder sb = new StringBuilder();
-                if (e.getChiefComplaint() != null) sb.append("主诉：").append(e.getChiefComplaint()).append("；");
-                if (e.getAssessment() != null) sb.append("判断：").append(e.getAssessment()).append("；");
-                if (e.getPlan() != null) sb.append("处置：").append(e.getPlan());
-                e.setSummaryText(sb.toString());
+                e.setSummaryText(summaryOf(r, e));
                 encounters.save(e);
             } catch (Exception ex) {
-                // 落库失败不影响本次返回；但要在审计里记一笔，避免静默丢失
-                auditForward("/api/consult/finish", ref, body, r);
+                // 落库失败不影响本次返回，但必须留痕；审计在下方统一记一次（原来这里
+                // 记一次、外面再记一次，落库失败会写出两条重复审计）。
+                log.warn("预问诊就诊落库失败：ref={}", ref, ex);
             }
         }
         auditForward("/api/consult/finish", ref, body, r);
@@ -385,5 +408,58 @@ public class MedicalProxyController {
     private static String str(Map<String, Object> body, String k) {
         Object v = body == null ? null : body.get(k);
         return v == null ? null : String.valueOf(v);
+    }
+
+    /** 按候选键依次取第一个非空文本（兼容认知侧 snake_case 与早期驼峰桩）。 */
+    private static String firstText(JsonNode n, String... keys) {
+        if (n == null) {
+            return null;
+        }
+        for (String k : keys) {
+            JsonNode v = n.path(k);
+            if (!v.isMissingNode() && !v.isNull()) {
+                String s = v.asText(null);
+                if (s != null && !s.isBlank()) {
+                    return s.trim();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 去标识化摘要：只存**结构化事实**（主诉 / 现病史要素 / 分诊建议），
+     * 不存原始问诊对话（数据最小化，见 PLAN §前置条件①），也绝不追加"判断/处置"
+     * —— 预问诊摘要按合规不含诊断结论，编造出来会让下游把患者自述当成医师结论。
+     */
+    private static String summaryOf(JsonNode r, Encounter e) {
+        StringBuilder sb = new StringBuilder();
+        if (e.getChiefComplaint() != null) {
+            sb.append("主诉：").append(e.getChiefComplaint()).append("；");
+        }
+        JsonNode present = r == null ? null : r.path("present_illness");
+        if (present != null && present.isObject()) {
+            present.fields().forEachRemaining(en -> {
+                String v = en.getValue().asText("");
+                if (!v.isBlank()) {
+                    sb.append(en.getKey()).append("：").append(v.trim()).append("；");
+                }
+            });
+        }
+        JsonNode triage = r == null ? null : r.path("triage");
+        if (triage != null && triage.isObject()) {
+            String dept = firstText(triage, "suggested_department");
+            if (dept != null) {
+                sb.append("分诊建议：").append(dept).append("；");
+            }
+        }
+        if (e.getAssessment() != null) {
+            sb.append("判断：").append(e.getAssessment()).append("；");
+        }
+        if (e.getPlan() != null) {
+            sb.append("处置：").append(e.getPlan());
+        }
+        // 字段上限 4000（见 Encounter.summaryText），截断而不是让整条落库失败
+        return sb.length() > 4000 ? sb.substring(0, 4000) : sb.toString();
     }
 }
