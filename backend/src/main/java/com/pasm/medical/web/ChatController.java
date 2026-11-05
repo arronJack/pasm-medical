@@ -5,9 +5,15 @@ import com.pasm.medical.config.IdentityContext;
 import com.pasm.medical.domain.ChatMessage;
 import com.pasm.medical.domain.ChatSession;
 import com.pasm.medical.service.ChatService;
+import com.pasm.medical.service.ChatStreamService;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,9 +33,11 @@ import java.util.Map;
 public class ChatController {
 
     private final ChatService chat;
+    private final ChatStreamService streams;
 
-    public ChatController(ChatService chat) {
+    public ChatController(ChatService chat, ChatStreamService streams) {
         this.chat = chat;
+        this.streams = streams;
     }
 
     /** 患者请求转人工（幂等）。 */
@@ -45,7 +53,7 @@ public class ChatController {
         }
         try {
             ChatSession s = chat.handoff(ref, req.department(), req.chiefComplaint(),
-                    req.urgency(), me.displayName());
+                    req.urgency(), me.displayName(), req.transcript());
             return ResponseEntity.ok(sessionBody(s));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
@@ -83,10 +91,36 @@ public class ChatController {
     @PostMapping("/{id}/take")
     public ResponseEntity<?> take(@PathVariable Long id) {
         try {
-            return ResponseEntity.ok(sessionBody(chat.take(id)));
+            ChatSession s = chat.take(id);
+            streams.session(id, sessionBody(s));   // 患者端立刻看到「已被接诊」
+            return ResponseEntity.ok(sessionBody(s));
         } catch (ChatService.AccessException e) {
             return ResponseEntity.status(403).body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /**
+     * SSE 长连接：先补发 {@code afterId} 之后的历史，再实时推送新消息/状态。
+     *
+     * <p>★ 先鉴权再建长连接：否则会先给未授权连接一个 200，再在流里沉默 —— 排查极难。
+     */
+    @GetMapping(value = "/{id}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter stream(@PathVariable Long id,
+                             @RequestParam(defaultValue = "0") Long afterId) {
+        try {
+            chat.requireReadable(id);
+        } catch (ChatService.AccessException e) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, e.getMessage());
+        }
+        SseEmitter emitter = streams.subscribe(id);
+        for (ChatMessage m : chat.messages(id, afterId)) {
+            try {
+                emitter.send(SseEmitter.event().name("message").data(messageBody(m)));
+            } catch (IOException e) {
+                break;   // 客户端已断开，直接返回，emitter 会被 onError 清理
+            }
+        }
+        return emitter;
     }
 
     /** 增量拉取消息：afterId 之后的新消息。 */
@@ -106,7 +140,9 @@ public class ChatController {
     @PostMapping("/{id}/messages")
     public ResponseEntity<?> send(@PathVariable Long id, @RequestBody SendRequest req) {
         try {
-            return ResponseEntity.ok(messageBody(chat.post(id, req.body())));
+            ChatMessage m = chat.post(id, req.body());
+            streams.message(id, messageBody(m));   // 在线的一方立刻收到（未在线则从 DB 补）
+            return ResponseEntity.ok(messageBody(m));
         } catch (ChatService.AccessException e) {
             return ResponseEntity.status(403).body(Map.of("error", e.getMessage()));
         } catch (IllegalArgumentException e) {
@@ -124,7 +160,10 @@ public class ChatController {
             Object s = out.get("session");
             Map<String, Object> body = new LinkedHashMap<>();
             if (s instanceof ChatSession cs) {
-                body.put("session", sessionBody(cs));
+                Map<String, Object> sb = sessionBody(cs);
+                body.put("session", sb);
+                // 先推「已结束」，再关掉长连接 —— 否则对方会一直停在"正在服务"
+                streams.sessionAndClose(id, sb);
             }
             body.put("encounterId", out.get("encounterId"));
             body.put("alreadyClosed", out.get("alreadyClosed"));
@@ -164,7 +203,7 @@ public class ChatController {
     }
 
     public record HandoffRequest(String patientRef, String department,
-                                 String chiefComplaint, String urgency) {
+                                 String chiefComplaint, String urgency, String transcript) {
     }
 
     public record SendRequest(String body) {

@@ -164,7 +164,7 @@ export const api = {
 
   // ── 人工坐诊 ──
   /** 患者请求转人工（幂等：已有进行中会话直接返回）。 */
-  chatHandoff: (body: { patientRef?: string; department: string; chiefComplaint?: string; urgency?: string }) =>
+  chatHandoff: (body: { patientRef?: string; department: string; chiefComplaint?: string; urgency?: string; transcript?: string }) =>
     call<ChatSession>('/chat/handoff', { method: 'POST', body: JSON.stringify(body) }),
   /** 患者当前进行中的会话（没有则 null）。 */
   chatMy: async (): Promise<ChatSession | null> => {

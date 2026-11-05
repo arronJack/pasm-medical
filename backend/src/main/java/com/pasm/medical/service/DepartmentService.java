@@ -1,7 +1,10 @@
 package com.pasm.medical.service;
 
 import com.pasm.medical.domain.Department;
+import com.pasm.medical.repository.ChatSessionRepository;
 import com.pasm.medical.repository.DepartmentRepository;
+import com.pasm.medical.repository.EncounterRepository;
+import com.pasm.medical.repository.KnowledgeDocRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,9 +17,16 @@ import java.util.Optional;
 public class DepartmentService {
 
     private final DepartmentRepository repo;
+    private final EncounterRepository encounters;
+    private final KnowledgeDocRepository kb;
+    private final ChatSessionRepository chats;
 
-    public DepartmentService(DepartmentRepository repo) {
+    public DepartmentService(DepartmentRepository repo, EncounterRepository encounters,
+                             KnowledgeDocRepository kb, ChatSessionRepository chats) {
         this.repo = repo;
+        this.encounters = encounters;
+        this.kb = kb;
+        this.chats = chats;
     }
 
     public List<Department> listAll() {
@@ -77,16 +87,21 @@ public class DepartmentService {
     /**
      * 删除科室。
      *
-     * <p>★ 只允许删除**从未被使用**的科室（这里不做跨表引用统计，采用更保守的规则：
-     * 停用优先）。真正承载历史数据的科室应停用而不是删除 —— 删掉会让历史就诊/资料
-     * 按名称回查不到。调用方（界面）默认提供"停用"，删除只用于配错的脏数据。
+     * <p>★ <b>已有历史数据的科室不允许删除</b>：就诊/资料/会话里存的是**科室名称**，
+     * 删掉主数据后这些历史会变成无法解释的孤儿字符串（统计口径、按科室授权、审计回溯全部失真）。
+     * 正确做法是「停用」—— 停用只影响新选择，历史仍在。
      */
     @Transactional
     public void delete(Long id) {
-        if (!repo.existsById(id)) {
-            throw new IllegalArgumentException("科室不存在：" + id);
+        Department d = repo.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("科室不存在：" + id));
+        if (encounters.existsByDepartment(d.getName())
+                || kb.existsByDepartment(d.getName())
+                || chats.existsByDepartment(d.getName())) {
+            throw new IllegalArgumentException(
+                    "科室「" + d.getName() + "」已有历史数据，不能删除；请改用「停用」");
         }
-        repo.deleteById(id);
+        repo.delete(d);
     }
 
     private static String requireName(String name) {

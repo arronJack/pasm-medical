@@ -19,6 +19,9 @@ public interface KnowledgeDocRepository extends JpaRepository<KnowledgeDoc, Long
 
     Optional<KnowledgeDoc> findByDocKey(String docKey);
 
+    /** 科室是否已有资料（删除科室前拦住）。 */
+    boolean existsByDepartment(String department);
+
     long countByStatus(String status);
 
     /** 按版本号查资料（知识池回滚时定位"上一版本引入的资料"）。 */

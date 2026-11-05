@@ -19,4 +19,7 @@ public interface ChatSessionRepository extends JpaRepository<ChatSession, Long> 
 
     /** 全院队列（超管）。 */
     List<ChatSession> findByStatusInOrderByUpdatedAtDesc(Collection<String> statuses);
+
+    /** 科室是否已有会话（删除科室前拦住）。 */
+    boolean existsByDepartment(String department);
 }

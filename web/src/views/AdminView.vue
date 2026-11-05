@@ -74,6 +74,9 @@
               <div class="chat-h">
                 <b>{{ activeChat.patientRef }}</b>
                 <span class="scopebadge">{{ activeChat.department }}</span>
+                <!-- 过敏/慢病必须常驻可见：这是坐诊时最容易漏、后果最重的一条信息 -->
+                <span v-if="chatPatient?.allergy" class="pflag danger">过敏：{{ chatPatient.allergy }}</span>
+                <span v-if="chatPatient?.chronic" class="pflag warn">慢病：{{ chatPatient.chronic }}</span>
                 <span class="scopebadge" :class="{ muted: activeChat.status === 'WAITING' }">
                   {{ activeChat.status === 'WAITING' ? '等待接诊' : '人工中' }}
                 </span>
@@ -446,6 +449,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { api, type AdminConfigView, type DesiredConfig, type IdentityView, type KbDoc, type KbCandidate, type KbPoolVersion, type ChatSession, type ChatMessage } from '../api'
+import { subscribeChat } from '../chatStream'
 import { ensureIdentity } from '../identity'
 
 /**
@@ -883,6 +887,46 @@ const closePanel = ref(false)
 const closeAssessment = ref('')
 const closePlan = ref('')
 const chatBusy = ref(false)
+/** 该患者档案（过敏/慢病）—— 坐诊时必须看得到，否则等于蒙眼开聊。 */
+const chatPatient = ref<{ allergy: string; chronic: string; name: string } | null>(null)
+/** SSE 去重：同一条消息可能同时来自「发送响应」与「服务端推送」。 */
+const chatSeen = new Set<number>()
+let chatUnsub: (() => void) | null = null
+
+function pushMsg(m: ChatMessage) {
+  if (chatSeen.has(m.id)) return
+  chatSeen.add(m.id)
+  chatMsgs.value.push(m)
+  nextTick(() => {
+    if (chatBox.value) chatBox.value.scrollTop = chatBox.value.scrollHeight
+  })
+}
+
+/** 订阅该会话的 SSE（先补发 afterId 之后的历史，再走实时推送）。 */
+function startStream(afterId = 0) {
+  stopStream()
+  const s = activeChat.value
+  if (!s) return
+  chatUnsub = subscribeChat(s.id, afterId, {
+    onMessage: pushMsg,
+    onSession: (next) => {
+      activeChat.value = next
+      if (next.status === 'CLOSED') {
+        stopStream()
+        loadQueue()
+      }
+    },
+    onError: () => { chatErr.value = '实时连接中断，正在重连…' },
+    onOpen: () => { chatErr.value = '' },
+  })
+}
+
+function stopStream() {
+  if (chatUnsub) {
+    chatUnsub()
+    chatUnsub = null
+  }
+}
 
 async function loadQueue() {
   if (!me.value?.clinicalSide) return
@@ -898,11 +942,19 @@ async function loadQueue() {
 }
 
 async function openSession(s: ChatSession) {
+  stopStream()
   activeChat.value = s
   chatMsgs.value = []
+  chatSeen.clear()
   closePanel.value = false
   chatErr.value = ''
-  await pullMessages(true)
+  chatPatient.value = null
+  // 过敏/慢病是坐诊的安全前提，拉不到就明确留空，不阻断会话
+  try {
+    const p = await api.patient(s.patientRef)
+    chatPatient.value = { allergy: p.allergy || '', chronic: p.chronic || '', name: p.name || '' }
+  } catch { /* 无权限或接口不可用时留空 */ }
+  startStream(0)
 }
 
 async function pullMessages(reset = false) {
@@ -925,7 +977,10 @@ async function takeSession() {
   if (!activeChat.value) return
   try {
     activeChat.value = await api.chatTake(activeChat.value.id)
-    await Promise.all([pullMessages(true), loadQueue()])
+    await loadQueue()
+    // 若 SSE 尚未建立（例如刚打开页面），补一次历史
+    if (!chatUnsub) startStream(0)
+    await pullMessages()
   } catch (e) {
     chatErr.value = e instanceof Error ? e.message : String(e)
   }
@@ -938,10 +993,8 @@ async function sendChat() {
   chatBusy.value = true
   try {
     const m = await api.chatSend(s.id, body)
-    chatMsgs.value.push(m)
+    pushMsg(m)                 // SSE 也会推同一条，chatSeen 去重
     chatDraft.value = ''
-    await nextTick()
-    if (chatBox.value) chatBox.value.scrollTop = chatBox.value.scrollHeight
   } catch (e) {
     chatErr.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -958,6 +1011,7 @@ async function doClose() {
     closePlan.value = ''
     activeChat.value = r.session
     chatErr.value = ''
+    stopStream()
     // 结束后会多一条就诊，患者列表要跟着更新（否则"结束"看起来什么都没发生）
     patients.value = (await api.adminPatients()) as PatientRow[]
     await loadQueue()
@@ -1030,14 +1084,17 @@ async function removeDept(d: { id: number; name: string; active: boolean; sortOr
 
 let chatTimer: number | undefined
 onMounted(() => {
+  // 消息走 SSE 实时推送；这里的 6s 轮询只是**兜底**（队列状态 / 极端网络下 SSE 不可用），
+  // 不再是主要的消息通道 —— 否则等于没换成 SSE。
   chatTimer = window.setInterval(() => {
     if (tab.value !== 'clinic') return
     loadQueue()
     if (activeChat.value) pullMessages()
-  }, 2000)
+  }, 6000)
 })
 onBeforeUnmount(() => {
   if (chatTimer) window.clearInterval(chatTimer)
+  stopStream()
 })
 
 onMounted(load)
@@ -1204,6 +1261,11 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 10px 12px; border-bottom: 1px solid var(--line);
 }
+.pflag {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid transparent;
+}
+.pflag.danger { color: #9f1239; background: #fff1f2; border-color: #fecdd3; }
+.pflag.warn { color: #92400e; background: #fffbeb; border-color: #fde68a; }
 .chat-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .msg { display: flex; flex-direction: column; max-width: 78%; }
 .msg.patient { align-self: flex-start; }

@@ -720,6 +720,14 @@ def main() -> int:                                # noqa: C901
             st, d = req("DELETE", base + "/api/admin/departments/%s" % new_dept, token=token)
             check("★ 删除科室", st == 200, str(st))
 
+        # ★ 已有历史就诊/资料/会话的科室不能删（删了历史归类会变孤儿），只能停用
+        st, d = req("GET", base + "/api/admin/departments", token=token)
+        busy = next((x for x in d if x.get("name") == "发热门诊"), None) if isinstance(d, list) else None
+        if busy:
+            st, d = req("DELETE", base + "/api/admin/departments/%s" % busy.get("id"), token=token)
+            check("★ 反例：删除已有历史数据的科室 → 400（提示改用停用）",
+                  st == 400 and "停用" in str(d), str(st) + " " + str(d)[:160])
+
         # 第二个科室的医生：用于验证坐诊队列的科室隔离
         st, d = req("POST", base + "/api/auth/login",
                     {"username": "doctor", "password": "123456", "department": "心内科"})
@@ -729,7 +737,8 @@ def main() -> int:                                # noqa: C901
               str(d)[:140])
 
         st, d = req("POST", base + "/api/chat/handoff",
-                    {"department": "发热门诊", "chiefComplaint": "联调：发热咳嗽"},
+                    {"department": "发热门诊", "chiefComplaint": "联调：发热咳嗽",
+                     "transcript": "患者：发热三天；助手：有没有咳嗽？患者：有一点"},
                     token=ptoken)
         sid = d.get("id") if isinstance(d, dict) else None
         check("★ 患者转人工 → 进入发热门诊队列（WAITING）",
@@ -771,6 +780,69 @@ def main() -> int:                                # noqa: C901
             st, d = req("GET", base + "/api/chat/%s/messages?afterId=0" % sid, token=dtoken)
             check("★ 医生能收到患者消息（增量拉取不漏）",
                   st == 200 and any(m.get("sender") == "PATIENT" for m in d), str(d)[:180])
+            check("★ 转人工时带上 AI 预问诊记录（医生不用把患者问过的话再问一遍）",
+                  st == 200 and any("AI 预问诊记录" in str(m.get("body", "")) for m in d),
+                  str(d)[:220])
+
+            # SSE：以「当前最后一条 id」作为起点订阅，随后医生发消息，患者端应实时收到
+            last_id = max([m.get("id", 0) for m in d], default=0)
+            import http.client, threading, time as _time
+            from urllib.parse import urlparse
+            u = urlparse(base)
+            sse = {"code": None, "events": []}
+
+            def sse_reader():
+                # ★ 不能用 resp.fp.readline()：那是**原始 chunked 流**，会读到
+                #   "13 / b7 / 2" 这些分块头，且 data: 与 JSON 会被拆到两行。
+                #   用 read1() 让 http.client 解分块，再按空行切 SSE 事件。
+                import socket as _socket
+                try:
+                    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=3)
+                    conn.request("GET", "/api/chat/%s/stream?afterId=%s" % (sid, last_id),
+                                 headers={"Authorization": "Bearer " + ptoken,
+                                          "Accept": "text/event-stream"})
+                    resp = conn.getresponse()
+                    sse["code"] = resp.status
+                    buf = ""
+                    deadline = _time.time() + 12
+                    while _time.time() < deadline:
+                        try:
+                            chunk = resp.read1(4096)
+                        except _socket.timeout:
+                            continue
+                        if not chunk:
+                            break
+                        buf += chunk.decode("utf-8", "replace")
+                        while "\n\n" in buf:
+                            block, buf = buf.split("\n\n", 1)
+                            data = "".join(
+                                ln[5:].strip() for ln in block.split("\n")
+                                if ln.startswith("data:")
+                            )
+                            if data:
+                                sse["events"].append(data)
+                        if any("SSE 实时推送测试" in e for e in sse["events"]):
+                            break
+                    conn.close()
+                except Exception as e:
+                    sse["events"].append("ERR:" + repr(e)[:80])
+
+            th = threading.Thread(target=sse_reader, daemon=True)
+            th.start()
+            # 等连接真正建立（拿到 200）再发消息，避免"先发后订阅"造成偶发失败
+            for _ in range(60):
+                if sse["code"] is not None:
+                    break
+                _time.sleep(0.1)
+            _time.sleep(0.3)
+            st, d = req("POST", base + "/api/chat/%s/messages" % sid,
+                        {"body": "医生：SSE 实时推送测试"}, token=dtoken)
+            th.join(timeout=13)
+            check("★ SSE 连接建立（text/event-stream，鉴权后）",
+                  sse["code"] == 200, "%s %s" % (sse["code"], str(sse["events"])[:120]))
+            check("★ SSE 实时推送：医生发消息后患者端立刻收到（不靠轮询）",
+                  any("SSE 实时推送测试" in e for e in sse["events"]),
+                  str(sse["events"])[:200])
 
             st, d = req("POST", base + "/api/chat/%s/close" % sid,
                         {"assessment": "上呼吸道感染可能", "plan": "对症退热，必要时复诊"},

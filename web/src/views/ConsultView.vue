@@ -212,6 +212,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, type ChatSession, type ConsultState, type EncounterDetail, type Evidence, type LabItem, type Triage } from '../api'
+import { subscribeChat } from '../chatStream'
 
 interface Msg {
   /** doctor / system 来自人工坐诊会话（与 AI 消息同列渲染，保持时间顺序）。 */
@@ -280,6 +281,55 @@ const handoffErr = ref('')
 /** 已渲染过的人工消息 id（去重）。 */
 const chatSeen = new Set<number>()
 let chatTimer: number | undefined
+let chatUnsub: (() => void) | null = null
+
+/** 把 AI 预问诊的关键问答带给医生（截断，避免把整段会话塞进一条消息）。 */
+function buildTranscript(): string {
+  return messages.value
+    .filter((m) => !m.chatId && (m.role === 'user' || m.role === 'assistant'))
+    .slice(-10)
+    .map((m) => (m.role === 'user' ? '患者：' : '助手：') + m.text.replace(/\s+/g, ' ').slice(0, 160))
+    .join('；')
+}
+
+/** 订阅该会话的 SSE：先补发历史，再实时接收医生消息与状态变化。 */
+function startChatStream(afterId = 0) {
+  stopChatStream()
+  const s = humanSession.value
+  if (!s) return
+  chatUnsub = subscribeChat(s.id, afterId, {
+    onMessage: (m) => { pushChatMsg(m); void scrollDown() },
+    onSession: (next) => {
+      humanSession.value = next.status === 'CLOSED' ? null : next
+      if (next.status === 'CLOSED') stopChatStream()
+    },
+    onError: () => { handoffErr.value = '实时连接中断，正在重连…' },
+    onOpen: () => { handoffErr.value = '' },
+  })
+}
+
+function stopChatStream() {
+  if (chatUnsub) {
+    chatUnsub()
+    chatUnsub = null
+  }
+}
+
+/** 恢复现场：有进行中会话就订阅；没有就清空。 */
+async function syncSession() {
+  try {
+    const s = await api.chatMy()
+    if (!s) {
+      humanSession.value = null
+      stopChatStream()
+      return
+    }
+    humanSession.value = s
+    if (!chatUnsub) startChatStream(0)
+  } catch {
+    /* 轮询失败不打断问诊：SSE 仍可能在推 */
+  }
+}
 
 async function loadDeptOptions() {
   try {
@@ -319,10 +369,11 @@ async function handoff(auto = false) {
       department: dept,
       chiefComplaint: chief,
       urgency: state.value?.triage?.urgency || 'routine',
+      transcript: buildTranscript(),
     })
     humanSession.value = s
     chosenDept.value = s.department
-    await pollChat(true)
+    startChatStream(0)
   } catch (e) {
     handoffErr.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -384,12 +435,17 @@ async function loadPatient() {
 
 onMounted(async () => {
   await Promise.all([loadPatient(), loadDeptOptions()])
-  await pollChat(true)
-  chatTimer = window.setInterval(() => { pollChat() }, 2000)
+  await syncSession()
+  // 消息走 SSE 实时推送；10s 兜底轮询只补「SSE 不可用 / 断线重连期间」的缺口。
+  chatTimer = window.setInterval(() => {
+    syncSession()
+    if (humanSession.value) pollChat()
+  }, 10000)
 })
 
 onBeforeUnmount(() => {
   if (chatTimer) window.clearInterval(chatTimer)
+  stopChatStream()
 })
 
 async function scrollDown() {

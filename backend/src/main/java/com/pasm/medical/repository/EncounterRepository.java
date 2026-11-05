@@ -11,6 +11,9 @@ public interface EncounterRepository extends JpaRepository<Encounter, Long> {
     List<Encounter> findByPatientRefOrderByOccurredAtDesc(String patientRef);
     long countByPatientRef(String patientRef);
 
+    /** 科室是否已有历史就诊（删除科室前必须拦住 —— 否则历史归类变成孤儿）。 */
+    boolean existsByDepartment(String department);
+
     /** 每日批处理：拉取某时间之后的就诊，作为候选经验抽取的数据源。 */
     List<Encounter> findByOccurredAtGreaterThanEqual(Instant from);
 

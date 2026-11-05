@@ -54,7 +54,7 @@ public class ChatService {
      */
     @Transactional
     public ChatSession handoff(String patientRef, String department, String chiefComplaint,
-                               String urgency, String patientName) {
+                               String urgency, String patientName, String transcript) {
         String dept = department == null ? "" : department.trim();
         if (dept.isEmpty()) {
             throw new IllegalArgumentException("请选择要转接的科室");
@@ -88,6 +88,19 @@ public class ChatService {
         sys.setCreatedAt(now);
         messages.save(sys);
         touch(s, sys);
+
+        // ★ 把 AI 预问诊的关键问答一起交给医生 —— 否则医生要重新问一遍，
+        //   既浪费患者时间，也可能漏掉已经说过的红旗线索。只带摘要文本，不传原始会话 ID。
+        if (transcript != null && !transcript.isBlank()) {
+            ChatMessage t = new ChatMessage();
+            t.setSessionId(s.getId());
+            t.setSender(ChatMessage.SYSTEM);
+            t.setSenderName("预问诊记录");
+            t.setBody("AI 预问诊记录：" + trim(transcript, 3000));
+            t.setCreatedAt(Instant.now());
+            messages.save(t);
+            touch(s, t);
+        }
 
         audit.recordRead(patientName == null ? patientRef : patientName, patientRef,
                 "chat-handoff", "session=" + s.getId() + ";dept=" + dept);
@@ -161,6 +174,11 @@ public class ChatService {
         requireReadable(s);
         return messages.findBySessionIdAndIdGreaterThanOrderByIdAsc(
                 id, afterId == null ? 0L : Math.max(0L, afterId));
+    }
+
+    /** 供 SSE 端点先做鉴权（不通过就不建立长连接）。 */
+    public void requireReadable(Long id) {
+        requireReadable(require(id));
     }
 
     /** 发消息：患者本人，或该会话的接诊医生（超管可代发用于排障）。 */
