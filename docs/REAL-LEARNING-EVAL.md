@@ -10,7 +10,7 @@
 
 ## 结论先行
 
-- 核验 **71 项通过 / 0 项失败**；失败项即本轮真实数据暴露的缺口（见下文「发现」）。
+- 核验 **71 项通过 / 0 项失败**；首轮评测曾以 3 项失败暴露真实数据缺口，修复后本轮全绿（详见「四、发现与处置」）。
 - 开关语义：`MEDICAL_LEARNING_AUTO` 只控制**每日 02:00 的 `@Scheduled` 批处理**；审核台的手动 `POST /api/admin/kb/candidates/generate` 不受它限制（设计如此）。本轮用手动入口触发「那一轮」，同时用随报告回传的 `autoGenerateEnabled` 硬证开关注入值。
 - 真实链路落库：主诉 / 科室 / 去标识化摘要均非空；`assessment`/`plan` 按合规为空。
 - 候选生成：首轮 generated=5 / deduplicated=0 / conflict=0 / pendingTotal=7；指纹去重、冲突挂起、审核闸门、版本回滚均按设计工作。

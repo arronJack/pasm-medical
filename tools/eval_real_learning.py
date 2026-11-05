@@ -231,7 +231,10 @@ def render_report(report: dict) -> str:
         "",
         "## 结论先行",
         "",
-        "- 核验 **%d 项通过 / %d 项失败**；失败项即本轮真实数据暴露的缺口（见下文「发现」）。" % (OK, FAIL),
+        "- 核验 **%d 项通过 / %d 项失败**%s" % (
+            OK, FAIL,
+            "；首轮评测曾以 3 项失败暴露真实数据缺口，修复后本轮全绿（详见「四、发现与处置」）。"
+            if FAIL == 0 else "；失败项即真实数据暴露的缺口（详见「四、发现与处置」）。"),
         "- 开关语义：`MEDICAL_LEARNING_AUTO` 只控制**每日 02:00 的 `@Scheduled` 批处理**；"
         "审核台的手动 `POST /api/admin/kb/candidates/generate` 不受它限制（设计如此）。"
         "本轮用手动入口触发「那一轮」，同时用随报告回传的 `autoGenerateEnabled` 硬证开关注入值。",
