@@ -198,10 +198,26 @@ export const api = {
   /** 当前身份。路由守卫与顶栏都用它，别把登录响应缓存下来当身份用。 */
   me: () => call<IdentityView>('/auth/me'),
 
-  /** 带依据的问答。认知服务会过相关性闸门；无依据时 refused=true（如实显示，不软化） */
+  /**
+   * 带依据的问答。认知服务会过相关性闸门；无依据时 `refused=true`（如实显示，不软化）。
+   *
+   * ★ `message` 是**已按依据整理的正文**（2026-11-06 起非空）。在此之前它恒为空，
+   *   界面会渲染出一个"有来源、没正文"的空气泡 —— 字段存在不等于有内容，
+   *   所以这里显式声明它、页面也必须有兜底。
+   */
   ask: (patientRef: string, question: string, k = 5) =>
-    call<{ evidence: { hits: Evidence[] }; requiresPhysicianConfirmation: boolean; disclaimer: string }>(
-      '/assist/ask', { method: 'POST', body: JSON.stringify({ patientRef, question, k }) }),
+    call<{
+      patientRef: string
+      question: string
+      message: string
+      evidence: { hits: Evidence[] }
+      sources: Evidence[]
+      count: number
+      refused: boolean
+      refusalReason: string
+      requiresPhysicianConfirmation: boolean
+      disclaimer: string
+    }>('/assist/ask', { method: 'POST', body: JSON.stringify({ patientRef, question, k }) }),
 
   history: (patientRef: string) =>
     call<{ encounters: Record<string, unknown>[] }>(

@@ -1,6 +1,6 @@
 # 真实链路就诊数据 × 自学习候选池 评测报告
 
-- 生成时间：2026-11-06 16:38:21
+- 生成时间：2026-11-06 18:19:04
 - 仓库：`E:/AI/pasm/code/pasm-medical`
 - 命令：`python tools/eval_real_learning.py`
 - 后端开关：`MEDICAL_LEARNING_AUTO=true`（dev 档，H2 内存库，进程结束即销毁）

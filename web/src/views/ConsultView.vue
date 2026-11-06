@@ -93,7 +93,10 @@
 
           <div v-if="m.refused" class="refused">
             未找到可支撑该问题的资料，已如实说明（未编造）
+            <span v-if="m.refusalReason" class="refused-why">（判据：{{ m.refusalReason }}）</span>
           </div>
+
+          <div v-if="m.disclaimer" class="disc">{{ m.disclaimer }}</div>
 
           <details v-if="m.evidence?.length" class="evidence">
             <summary>依据 {{ m.evidence.length }} 条</summary>
@@ -143,6 +146,9 @@
         <button class="primary" :disabled="readonly || busy || !draft.trim()" @click="send">
           {{ busy ? '处理中…' : '发送' }}
         </button>
+        <button class="ghost" :disabled="readonly || busy || !draft.trim()"
+                title="只依据院内已审核资料作答，不替代医师诊断"
+                @click="askAI">查资料</button>
         <button v-if="canFinish" class="ghost" :disabled="busy" title="把本次问询归档为一条就诊记录"
                 @click="finishConsult">结束问诊</button>
       </div>
@@ -223,6 +229,10 @@ interface Msg {
   senderName?: string
   evidence?: Evidence[]
   refused?: boolean
+  /** 拒答原因（后端给的判据，如「无可追溯来源」）。如实显示，不软化。 */
+  refusalReason?: string
+  /** 资料问答的免责声明（由后端下发，前端不硬编码措辞）。 */
+  disclaimer?: string
   resolved?: string
   /** 问题消息携带的 key —— 反馈时拼成 ask:<key> 写进医学动作后验（P0.5）。 */
   qkey?: string
@@ -495,6 +505,46 @@ async function send() {
     }
   } catch (e) {
     messages.value.push({ role: 'assistant', text: '调用失败：' + (e instanceof Error ? e.message : e) })
+  } finally {
+    busy.value = false
+    await scrollDown()
+  }
+}
+
+/**
+ * 查院内资料（**带依据**的问答）。
+ *
+ * ★ 与「发送」是两条独立链路，别合并：
+ *   · 发送 → 问诊树（采集病史，问题由规则决定）；
+ *   · 查资料 → /api/assist/ask（按**已审核资料**回答「就医指征 / 用药安全」这类问题）。
+ *   合并会互相污染：问诊树会把自由提问当成"回答当前问题"，问答又会跳过病史采集。
+ *
+ * ★ 拒答必须原样显示：后端 refused=true 时 text 就是拒答话术，不许软化、
+ *   也不许用「可能」「建议咨询」把它包装成一句答案。
+ */
+async function askAI(): Promise<void> {
+  if (readonly.value) return
+  const q = draft.value.trim()
+  if (!q || busy.value) return
+  draft.value = ''
+  messages.value.push({ role: 'user', text: q })
+  await scrollDown()
+  busy.value = true
+  try {
+    const r = await api.ask(patient.value.ref, q)
+    const body = (r.message || '').trim()
+    messages.value.push({
+      role: 'assistant',
+      // 兜底：后端没给正文时**不能渲染空气泡**（患者会以为系统坏了）。
+      // 但也不许自己编一句话补上 —— 只如实说明没拿到正文。
+      text: body || '（未获取到正文，请换个问法，或直接咨询医师）',
+      evidence: r.sources || r.evidence?.hits || [],
+      refused: r.refused,
+      refusalReason: r.refused ? (r.refusalReason || '') : '',
+      disclaimer: r.refused ? '' : (r.disclaimer || ''),
+    })
+  } catch (e) {
+    messages.value.push({ role: 'assistant', text: '查资料失败：' + (e instanceof Error ? e.message : e) })
   } finally {
     busy.value = false
     await scrollDown()
@@ -794,6 +844,8 @@ function rowClass(it: LabItem) {
 }
 .msg.user .bubble { background: #eef4f6; border-color: #d5e3e8; }
 .refused { font-size: 12px; color: var(--danger-fg); margin-top: 4px; }
+.refused-why { color: var(--text-3, var(--text-2)); }
+.disc { font-size: 11px; color: var(--text-2); margin-top: 6px; line-height: 1.5; }
 .evidence { margin-top: 6px; font-size: 12px; color: var(--text-2); }
 .evidence ul { margin: 4px 0 0 16px; padding: 0; }
 .actions { margin-top: 6px; display: flex; gap: 8px; }

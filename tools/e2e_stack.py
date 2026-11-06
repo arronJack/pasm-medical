@@ -363,6 +363,15 @@ def main() -> int:                                # noqa: C901
               bool(asks) and asks[0].get("actor") == "staff",
               "命中 %d 条 %s" % (len(asks), str(asks[:1])[:200]))
 
+        # ★ 审计要记**正文是谁产出的**（llm:<model> / fallback / refused）。
+        #   以前一律写死 "cognition-gated-ask" —— 出了事查不出"这句话是模型说的还是模板拼的"，
+        #   而这两者在医疗场景里的责任完全不同。
+        #   这条探针提问是随机串，**没有命中任何资料 → 必然拒答**，所以期望值是 refused。
+        mv = str((asks[0].get("modelVersion") if asks else "") or "")
+        check("★ 审计记录正文产出方（无依据拒答时应为 refused，而不是写死的 cognition-gated-ask）",
+              mv == "refused",
+              "modelVersion=%r" % (mv,))
+
         # ★ 薄转发层审计修复（P0 自洽）：consult-start 的 inputSnapshot 必须含主诉原文，
         #   而不是只有 "path=/api/consult/start"（旧实现查不出患者当时说了什么）。
         #   这条正好是 MedicalProxyController.auditForward 的回归钉。
@@ -399,6 +408,33 @@ def main() -> int:                                # noqa: C901
               st == 200 and d.get("refused") is False and bool(doc_src),
               "refused=%s docSources=%s" % (d.get("refused"), str(doc_src)[:180]))
 
+        # ★★ 2026-11-06：**有依据 ≠ 有正文**。旧实现 `guard_answer("", sources)` 把
+        #    空串当结论返回 —— 界面渲染出"有来源、没正文"的空气泡，而所有既有断言
+        #    （只查 refused / sources）**全绿**。这就是"字段存在不等于有内容"。
+        #    判据必须落在 `message` 的真实内容上，且要能分辨三种错：
+        #    空、抄了拒答话术、或压根没生成。
+        msg = str(d.get("message") or "")
+        check("★ 有依据时必须给出正文（不是空气泡）：message 非空且不是拒答话术",
+              bool(msg.strip()) and msg.strip() != "抱歉，我暂时没有查到与这个问题相关的可靠资料，无法给出结论。请以主管医师判断为准。",
+              "message=%r" % (msg[:80],))
+
+        # ★ 资料正文必须真的带出来（框架 kb.recall 返回的字段叫 brief，不是 content；
+        #   读错名字会静默拿到空串 → 正文层没有原文可组织，且不报错）。
+        briefs = [str(s.get("brief") or "") for s in doc_src]
+        check("★ 来源条目带资料正文（钉住 kb.recall 的 brief 字段名，读 content 会静默为空）",
+              bool(briefs) and all(b.strip() for b in briefs),
+              "briefs=%s" % (str(briefs)[:160],))
+
+        # ★ 有正文的这一路：审计要记成 fallback（本套件不配 LLM → 确定性原文摘录）。
+        #   与上面 refused 那条互为对照：两条都在，才能区分"永远同一个值"和"按实际情况记"。
+        st, dA = req("GET", base + "/api/admin/audit", token=token)
+        kb_asks = [a for a in (dA if isinstance(dA, list) else [])
+                   if a.get("action") == "ask" and kb_q in str(a.get("inputSnapshot") or "")]
+        kb_mv = str((kb_asks[0].get("modelVersion") if kb_asks else "") or "")
+        check("★ 有正文时审计记为 fallback（未配 LLM → 确定性原文摘录，不是模型生成）",
+              kb_mv == "fallback",
+              "modelVersion=%r hits=%d" % (kb_mv, len(kb_asks)))
+
         st, d = req("POST", base + "/api/admin/kb/%s/status" % kb_key,
                     {"active": False}, token=token)
         check("★ 下架资料：状态变更 + 重新同步检索副本",
@@ -409,6 +445,13 @@ def main() -> int:                                # noqa: C901
         check("★ 反例：资料下架后同一提问必须**回到拒答**（下架的资料不能继续当依据）",
               st == 200 and d.get("refused") is True and not (d.get("sources") or []),
               "refused=%s sources=%s" % (d.get("refused"), str(d.get("sources"))[:150]))
+        # ★ 拒答也必须有可显示的话术（空字符串会让前端出现空气泡）。
+        #   注意方向：这里断言的是"拒答话术非空"，与上一条"有依据时正文非空"互为对照 ——
+        #   只写一条都无法区分"永远空"和"永远有字"。
+        rmsg = str(d.get("message") or "")
+        check("★ 拒答路径也必须给出话术（非空），且不得为空字符串",
+              bool(rmsg.strip()) and "没有查到" in rmsg,
+              "message=%r" % (rmsg[:80],))
 
         # ★ 拒答率不再恒为 0：上面那次拒答要能在统计里看见
         #   （旧实现 ask 审计从不设置 refused → countByActionAndRefusedTrue("ask") 恒为 0）

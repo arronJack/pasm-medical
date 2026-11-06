@@ -90,7 +90,11 @@ public class AssistController {
             }
         }
         boolean refused = r.path("refused").asBoolean(false);
-        auditAsk(ref, req.question(), sources.size(), refused);
+        // ★ 正文是谁产出的：``llm:<model>``（真模型，已过引用核验）或 ``fallback``
+        //   （确定性原文摘录）。医疗系统里"模型说的"与"模板拼的"责任不同，
+        //   审计必须能区分 —— 以前一律写死 cognition-gated-ask，等于没记。
+        String answerSource = r.path("answer_source").asText("");
+        auditAsk(ref, req.question(), sources.size(), refused, answerSource);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("patientRef", ref);
         out.put("question", req.question());
@@ -101,6 +105,9 @@ public class AssistController {
         out.put("refused", refused);
         out.put("refusalReason", r.path("refusal_reason").asText(""));
         out.put("message", r.path("text").asText(""));
+        // 正文产出方（llm:<model> / fallback）—— 前端可展示"模板整理"还是"模型整理"，
+        // 运维排查"为什么话术很生硬"时第一眼就能看出来。
+        out.put("answerSource", answerSource);
         // 恒为 true —— 不要因为"看起来没风险"就放开
         out.put("requiresPhysicianConfirmation", true);
         out.put("disclaimer", "本结果由辅助系统基于既有资料生成，仅供医师参考，不构成诊断意见。");
@@ -190,13 +197,15 @@ public class AssistController {
 
     // ------------------------------------------------------------ 审计埋点
 
-    private void auditAsk(String patientRef, String question, int evidenceCount, boolean refused) {
+    private void auditAsk(String patientRef, String question, int evidenceCount,
+                          boolean refused, String answerSource) {
         AiAudit a = new AiAudit();
         a.setPatientRef(patientRef);
         a.setActor(AuditService.currentActor(null));
         a.setAction("ask");
         a.setEvidenceCount(evidenceCount);
-        a.setModelVersion("cognition-gated-ask");
+        // 记实际生成方：llm:deepseek-chat / fallback / （空 → 旧值兜底）
+        a.setModelVersion(answerSource.isBlank() ? "cognition-gated-ask" : answerSource);
         a.setInputSnapshot("question=" + question);
         // ★ 必须记下"这次拒答了没有"：统计里的**拒答率**就是数这个字段
         //   （`countByActionAndRefusedTrue("ask")`）。以前从不设置它 → 分子恒为 0 →

@@ -29,7 +29,7 @@
 | 安全与身份 | 患者隔离认知侧测试；无登录/角色体系 | 四角色（患者/医护/科室管理员/超管）+ URL 级与资源级**双层授权** + 归属校验挡 IDOR + 演示账号默认关闭 + 401/403 分离 + 读/写双向审计 + 资料库按科室授权 + **对接设置仅超管可见（医护后台不再显示该标签）** |
 | 自学习 | 只在 PLAN §8 的纸面设计，排期 **P3** | **前移落地**：候选池 + 审核台 + 知识池版本回滚（`V3__kb_candidates.sql`）；指纹去重、冲突挂起、采纳才入 `knowledge_docs`、驳回不入库；**已开启 `MEDICAL_LEARNING_AUTO` 跑完真实就诊数据评测（74 项全绿）**；**2026-11-06 补 V5 显式来源判据 + `approve()` 硬拒 422 闸门**；**生产开关仍关闭**（剩余瓶颈是知识库内容需临床签核，属机构流程，见 §5） |
 | 分发与工程化 | `pip install -e .`；无启动器；无迁移 | PyPI `pasm-medical` 0.1.0 → 0.1.1；`dist_smoke.py` 守住「装出来的包」；Windows 一键启动器 + `.gitattributes` 行尾契约；`tools/` 10 个验证脚本 |
-| 验证体系 | 认知 e2e **17 项** + 反例对照 | `run_checks.py --full` **17 项套件全绿**（2026-11-06 实测）；实测项数：模块自检 **97**、认知 e2e **19**、学习 e2e **14**、三端联调 **131**（含 SSE 首帧、医师确认闸门正反例、**MLLP 直连 15 项**）、MCP selftest **23**、MCP stdio e2e **15**、后端真 PG（含 MLLP 协议 10 + 投产门禁 8 + **影像归档 6 反例**）、真实就诊评测 **74**、分发形态冒烟 **9**。三套独立资产已编进 `--full`，不再靠人记得手动跑 |
+| 验证体系 | 认知 e2e **17 项** + 反例对照 | `run_checks.py --full` **17 项套件全绿**（2026-11-06 实测）；实测项数：模块自检 **105**、认知 e2e **19**、学习 e2e **14**、三端联调 **136**（含 SSE 首帧、医师确认闸门正反例、**MLLP 直连 15 项**）、MCP selftest **23**、MCP stdio e2e **15**、后端真 PG（含 MLLP 协议 10 + 投产门禁 8 + **影像归档 6 反例**）、真实就诊评测 **74**、分发形态冒烟 **9**。三套独立资产已编进 `--full`，不再靠人记得手动跑 |
 | 文档 | README + PLAN（108 + 385 行） | README + **8 份 docs**（新增 `COMPLIANCE-GATE.md` 投产 Go/No-Go 签核表）+ 本文与两篇分享稿 |
 
 ---
@@ -82,6 +82,7 @@
 | 9 | 双击启动器满屏乱码 / 无控制台时卡死 / 端口莫名被占用 | `.bat` 用了 UTF-8 + LF + 跨行括号块；`DETACHED_PROCESS` 下 `java -version`/`netstat` 输出 0 字节；环境变量 `SERVER__PORT` 被 Spring 宽松绑定成 `server.port` | GBK + CRLF + 单行 `goto` 结构；探测改读文件/只看退出码；`--server.port=8081` 钉在命令行；`.gitattributes` 根因修复 |
 | 10 | 认知层患者 A 召回里混进 B 的过敏史 | `pasm-skills` 的 `PasmV1CoreBackend` 持有模块单例，`set_data_dir()` 改的是全局目录 | `pasm-skills` 加 `data_dir` 作用域 + RLock；medical 依赖升到 ≥0.6.4 |
 | 11 | **三端联调全绿，但「AI 转人工」接不上真人**：医护后台只有查看、没有坐诊功能、无在线即时沟通；患者点转人工无处可去；对接设置还暴露给非超管角色 | 坐诊/转人工链路根本没建（只有查看态）；实时消息用轮询、断线丢上下文；`/api/admin/config` 仅按「后台」粗粒度放开，未收归超管 | `9080203` + `b363dec`：补 `chat_sessions`/`chat_messages`（Flyway `V4`）+ 坐诊台（队列/接诊/双向消息/结束落 `Encounter`）；患者一键转人工、红旗中断自动转接、带 AI 预问诊记录；**SSE 实时推送 + 断线重连**；科室主数据 + 登录选科；对接设置**仅超管可见**；在用科室禁删 |
+| 12 | **「有依据」却答不出话**：界面渲染出一个有来源、没正文的空气泡；而所有既有断言（只查 `refused` / `sources`）**全绿** | 两处叠加：① `ask()` 调 `guard_answer("", sources)` —— 把空串当结论返回，从没生成过正文；② `recall_docs` 读 `h.get("content")`，而框架 `kb.recall` 返回的字段名是 **`brief`** → 资料正文**静默为空**（检索本身一切正常，不报错） | 2026-11-06：Python 侧补 `llm.compose_answer`（依据整理 + 末行「依据：<标题>」**逐条核验**，引用未命中即整段作废回退原文摘录；无 LLM 同样回退，**永远非空**）；字段名改为 `brief or content`；审计 `model_version` 记 `llm:<model>` / `fallback`；前端 `ConsultView` 接 **「查资料」** 入口。反例对照：退回空串 → e2e 精确 1 项转红（`message=''`）；拆掉引用核验 → 模型编造的「可服用布洛芬，每日三次」被放行，自检转红。均还原后全绿 |
 
 > 方法论：**全绿 ≠ 断言有效**。反例对照（故意改坏 → 确认被抓到 → 还原）与「真实链路 + 真实数据」是这个项目两道最值钱的闸门。
 
@@ -90,7 +91,7 @@
 ## 5. 还有哪些问题（如实标注，别假装修好）
 
 ### 5.1 本轮复盘发现并**已修**的小问题
-- 文档验证项数口径漂移：`README.md` / `docs/GUIDE.md` / `docs/PLAN.md` / 配套 skill 里仍写着 `67 项` / `17 项` / `88 项` / `24 项` / `selftest 19 项` / `--java 21 项` 等旧数字，且同一文件自相矛盾（README 一处 67、一处 81）。已按 2026-11-06 实测统一为：**97 / 19 / 14 / 131 / 23 / 15 / 74**；`--full` 共 **17 套**，其中 MCP stdio 15 / 真实评测 74 / 分发冒烟 9 已从「独立资产」编进一键验证。`--java` 清单补 `MllpProtocolTest`（10 项）与 `ProductionGateTest`（8 项）。
+- 文档验证项数口径漂移：`README.md` / `docs/GUIDE.md` / `docs/PLAN.md` / 配套 skill 里仍写着 `67 项` / `17 项` / `88 项` / `24 项` / `selftest 19 项` / `--java 21 项` 等旧数字，且同一文件自相矛盾（README 一处 67、一处 81）。已按 2026-11-06 实测统一为：**105 / 19 / 14 / 136 / 23 / 15 / 74**；`--full` 共 **17 套**，其中 MCP stdio 15 / 真实评测 74 / 分发冒烟 9 已从「独立资产」编进一键验证。`--java` 清单补 `MllpProtocolTest`（10 项）与 `ProductionGateTest`（8 项）。
 - 配套 skill 中三条「未做」记录已过时（前端结束问诊入口 `91b679e`、科室统计 `7806b77`、医护与科室管理员能力差异 `92ee718`），已改为带 commit 证据的修复状态表。
 
 ### 5.2 仍未解决（按严重度排序，写进文章不能省）
@@ -103,7 +104,7 @@
 |---|---|---|
 | **P0 合规（机构流程）** | 规则表未经临床药师复核；未做医疗器械分类界定 / NMPA 注册路径；等保三级、PIA、单独同意、临床顾问与回顾性研究均未启动 | ❌ **仍未做，且代码补不了**。2026-11-06 补 `docs/COMPLIANCE-GATE.md` 逐项签核表 + `ProductionGate` 启动自检（默认 WARN，`strict=true` 时任一 BLOCK 阻止启动）。⚠ **MIT 只覆盖代码，代码开源 ≠ 可合法用于临床诊断**；「测试全绿」≠「可以进临床」 |
 | **P0 合规（数据资格）** | 预问诊候选不含医师结论，本不具备作为机构回答依据的资格 | ✅ **2026-11-06 已结构性根治**：`V5` 显式来源判据 + `approve()` 硬拒 422；合格数据源已具备（坐诊台 `close` 落 `PHYSICIAN_CONFIRMED`）。反例对照证明闸门失效时断言精确转红。**生产 `MEDICAL_LEARNING_AUTO` 仍关闭**，剩余瓶颈是知识库内容需临床团队签核（机构流程） |
-| P1 功能 | 影像归档、中医知识库**未开始**；AI 问答流式输出未做；pgvector / MinIO / Redis 仍是设计目标 | 影像归档：**2026-11-06 已补齐**纯归档+转交（V6 + 控制器 + 前端影像入口 + 6 项 PG 反例对照，含「结论字段入参 400」break→red→restore 证明），但**刻意不做分析**（无三类证，边界由代码强制）；落盘本地目录、非 PACS/MinIO 属部署缺口。中医知识库仍 ❌ 未开始；**SSE 只覆盖坐诊双向消息，AI 问答仍一次性响应**（不能写成「SSE 已全面落地」）；Redis 仅在多主机水平扩容时才是必需 |
+| P1 功能 | 影像归档、中医知识库**未开始**；AI 问答流式输出未做；pgvector / MinIO / Redis 仍是设计目标 | 影像归档：**2026-11-06 已补齐**纯归档+转交（V6 + 控制器 + 前端影像入口 + 6 项 PG 反例对照，含「结论字段入参 400」break→red→restore 证明），但**刻意不做分析**（无三类证，边界由代码强制）；落盘本地目录、非 PACS/MinIO 属部署缺口。中医知识库仍 ❌ 未开始；**AI 问答正文已于 2026-11-06 补齐**（Python 侧 `compose_answer`：依据整理 + 引用可核验 + 无 LLM 回退原文摘录），但 **SSE 仍只覆盖坐诊双向消息，AI 问答是一次性响应**（不能写成「SSE 已全面落地」）；Redis 仅在多主机水平扩容时才是必需 |
 | P1 集成 | ~~LIS 的 TCP MLLP 监听、HL7 ACK 报文~~ | ✅ **2026-11-06 已补**：MLLP over TCP + `ACK^R01`（AA/AE/AR）、`ZAT` 令牌段、fail closed、共用 `ingest()`，e2e 真开两个端口验 15 项。**仍未做**：LOINC/SNOMED 映射、跨机网络准入、TLS —— 边界见 `docs/INTEGRATION-LIS-FHIR.md` §7 |
 | P1 部署 | 多主机水平扩容需把 `SessionStore` 接 Redis/DB（协议已就位，默认 file 只覆盖单机多 worker）；生产需注入 `MEDICAL_AUTH_JWT_SECRET`、接医院统一身份 | 单实例/单机可用，多主机未验证；`ProductionGate` 会把「JWT 空 / 演示账号开着 / H2」标为 BLOCK |
 | P2 已知结构 | 红旗中断路径 `triage()` 不给 `suggested_department` → `department` 为空、候选按设计仅超管可见；科室角色看不到无 `patientRef` 的登录/登出/改配置审计事件；`stop-demo.bat` 在真正无控制台父进程下取 PID 仍用 netstat/findstr | 均已有明确边界说明，**未改** |
@@ -120,7 +121,7 @@
 JAVA_HOME='C:\Program Files\Java\jdk-18.0.1.1' \
   "C:/Python312/python.exe" "C:/Users/<你>/.workbuddy/skills/pasm-medical/scripts/run_checks.py" \
   --full --repo "E:/AI/pasm/code/pasm-medical"
-# 期望：17 项套件通过 / 0 项失败（三端联调 131 项、真实评测 74 项、MCP stdio 15 项、分发冒烟 9 项、后端真库 BUILD SUCCESS）
+# 期望：17 项套件通过 / 0 项失败（三端联调 136 项、真实评测 74 项、MCP stdio 15 项、分发冒烟 9 项、后端真库 BUILD SUCCESS）
 # 注：run_checks.py 是维护者本机的编排器（放在配套 skill 目录，不在仓库里）。
 # 外部读者 clone 后按 README.md「自检与端到端」逐条跑仓库内脚本即可，结论等价。
 

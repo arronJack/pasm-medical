@@ -13,11 +13,21 @@
 ★ 第 3 档不是"凑合"，是**产品要求**：医疗系统在模型不可用时
 **必须降级而不是报错**。患者问不出话，比话术生硬糟糕得多。
 
-★★ LLM 在本项目里的**三个正当位置**（其余一律不许）
+★★ LLM 在本项目里的**四个正当位置**（其余一律不许）
 --------------------------------------------------
   ① 理解患者口语 → 映射到问诊树节点（失败则回退到规则分词，见 consult.classify）
   ② 把**规则决定的**问题转成自然话术（谁问什么由问诊树决定，不是模型决定）
   ③ 把结构化事实组织成《预问诊摘要》的文字
+  ④ 把**已通过相关性闸门的资料原文**整理成回答文字（见 compose_answer_text）
+
+④ 是 2026-11-06 新增的，加它之前先看三条约束（缺一条就不要加）：
+  · **不是"检索"**：检索与"能不能答"由 service.ask 的闸门决定，模型拿到的
+    只有已经判定够格的那几条资料；模型**没有机会**决定"要不要答"。
+  · **不是"新增医学内容"**：prompt 明确只许改写给定原文，且输出必须带一行
+    可核验的「依据：<资料标题>」；**引用到不存在/未命中的标题就整段作废**，
+    回退到确定性原文摘录（`fallback_answer`）。这条是代码判据，不是提示词自觉。
+  · **不是"必需"**：无 LLM / 模型报错 / 输出跑偏，一律回退到原文摘录 ——
+    回答**永远非空**且**永远只含资料里出现过的话**。
 
 **绝对禁止**：让 LLM 决定"该问什么"、生成诊断结论、解读影像、判读检验数值。
 判读是规则（``safety`` / ``lab``），方向是问诊树（``consult``），
@@ -37,7 +47,8 @@ from typing import Any, Dict, List, Optional
 
 __all__ = ["LLMConfig", "LLMProvider", "NullProvider", "OllamaProvider",
            "OpenAICompatProvider", "build_provider", "phrase_question",
-           "compose_summary_text"]
+           "compose_summary_text", "compose_answer", "compose_answer_text",
+           "fallback_answer"]
 
 #: 系统提示词里必须钉死的边界。**改这段之前先想清楚合规后果。**
 SYSTEM_GUARD = (
@@ -244,6 +255,161 @@ def compose_summary_text(provider: LLMProvider,
     return (got or "").strip() or text
 
 
+#: 「依据资料作答」的系统提示词。与 SYSTEM_GUARD 分开：那边是"转述问题/写摘要"，
+#: 这边允许改写**已给定的资料原文**，但同样不许新增任何医学判断。
+ANSWER_SYSTEM = (
+    "你是医疗机构的资料整理助手。你的唯一任务：把【已检索到的资料原文】整理成"
+    "通顺、易懂的中文回答。\n"
+    "硬性规则（违反任何一条即视为回答无效）：\n"
+    "1) 只能使用资料原文中出现过的信息；不得补充资料之外的知识、经验或推测。\n"
+    "2) 不得给出诊断、病名判断、处方、或调整药物剂量的建议；"
+    "资料里若有具体用药说明，只能原样转述并注明“以医师/药师意见为准”。\n"
+    "3) 资料没有提到的内容，明确写“资料未提及”，不要猜。\n"
+    "4) 最后必须单独一行写：依据：<资料标题1>；<资料标题2>"
+    "（只许写上面列出的资料标题，不得编造标题）。\n"
+    "5) 不要写任何寒暄、不要写“作为 AI”。"
+)
+
+#: 引用行前缀。写成常量是为了「生成」与「核验」用同一份定义 ——
+#: 两处各写一遍，改一处就会静默放行（本项目踩过同类问题）。
+_CITE_PREFIXES = ("依据：", "依据:", "来源：", "来源:")
+
+
+def _norm_cite(text: str) -> str:
+    """比较标题用的归一化：去掉空白与常见标点，只留可比较的字符。"""
+    drop = set(" \t\r\n　·、，,。.；;：:（）()【】[]《》<>\"'“”‘’-—_/\\|")
+    return "".join(ch for ch in (text or "") if ch not in drop).lower()
+
+
+def fallback_answer(sources: Optional[List[Dict[str, Any]]] = None,
+                    max_items: int = 3) -> str:
+    """**确定性**回答：直接摘录已过闸门的资料原文。
+
+    ★ 这是"无 LLM / 模型跑偏"时的**唯一兜底**，所以它本身必须满足：
+      ① 永远不编造 —— 每一句都来自 ``sources[].brief`` 原文；
+      ② 永远不为空（只要有来源）—— 空回答会让界面显示一个空气泡，
+         患者以为"系统坏了"，比话术生硬糟糕得多。
+    """
+    lines: List[str] = []
+    for s in (sources or [])[:max_items]:
+        if not isinstance(s, dict):
+            continue
+        title = str(s.get("title") or "").strip()
+        brief = str(s.get("brief") or "").strip()
+        if not title and not brief:
+            continue
+        lines.append("· " + (("%s：" % title) if title else "") + brief)
+    if not lines:
+        return ""
+    return "根据院内资料：\n" + "\n".join(lines) + "\n（以上为资料原文摘录，请以主管医师判断为准。）"
+
+
+def _parse_citations(text: str) -> tuple:
+    """拆出「依据：A；B」这一行 → (正文, [引用标题])。
+
+    找不到引用行返回 ``(text, [])`` —— 调用方据此判定"未锚定"。
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    for idx in range(len(lines) - 1, -1, -1):
+        ln = lines[idx]
+        for p in _CITE_PREFIXES:
+            if ln.startswith(p):
+                raw = ln[len(p):]
+                cited = [x.strip() for x in raw.replace("；", ";").replace("、", ";")
+                         .replace(",", ";").replace("，", ";").split(";") if x.strip()]
+                body = "\n".join(lines[:idx]).strip()
+                return body, cited
+    return (text or "").strip(), []
+
+
+def compose_answer(provider: LLMProvider, question: str,
+                   sources: Optional[List[Dict[str, Any]]] = None,
+                   *, max_chars: int = 600) -> Dict[str, str]:
+    """同 :func:`compose_answer_text`，但额外回报**这段文字是谁产出的**。
+
+    返回 ``{"text": ..., "source": ...}``，``source`` 取值：
+      · ``"refused"``         没有依据 → 不该有正文（调用方本应拒答）
+      · ``"fallback"``        确定性原文摘录（无 LLM / 模型失败 / 输出跑偏）
+      · ``"llm:<model>"``     真模型生成，且已通过引用核验
+
+    ★ 为什么要回报这个：审计表有 ``model_version`` 列，但以前一律写死成
+      ``cognition-gated-ask`` —— 出了事查不出"这句话是模型说的还是模板拼的"。
+      医疗系统里这两者的责任完全不同，必须可区分。
+    """
+    src = [s for s in (sources or []) if isinstance(s, dict)]
+    if not src:
+        return {"text": "", "source": "refused"}
+    fallback = fallback_answer(src)
+
+    if not provider.available():
+        return {"text": fallback, "source": "fallback"}
+
+    blocks: List[str] = []
+    for i, s in enumerate(src, 1):
+        title = str(s.get("title") or "").strip()
+        brief = str(s.get("brief") or "").strip()
+        kind = "机构资料" if s.get("kind") == "doc" else "患者既往记录"
+        blocks.append("[%d]（%s）%s\n%s" % (i, kind, title or "（无标题）", brief or "（无正文）"))
+    material = "\n\n".join(blocks)
+
+    prompt = ("患者的问题：%s\n\n"
+              "可用资料（**只有这些**）：\n%s\n\n"
+              "请依据上述资料作答，并在最后一行列出你实际用到的资料标题。"
+              % (question, material))
+    try:
+        got = provider.complete(prompt, system=ANSWER_SYSTEM, max_tokens=500)
+    except Exception:
+        got = ""
+    got = (got or "").strip()
+    if not got:
+        return {"text": fallback, "source": "fallback"}
+
+    body, cited = _parse_citations(got)
+    if len(body) > max_chars:
+        return {"text": fallback, "source": "fallback"}
+    if not cited:
+        return {"text": fallback, "source": "fallback"}   # 未标注依据 = 未锚定，不敢发出去
+
+    known = [_norm_cite(str(s.get("title") or "")) for s in src]
+    known = [k for k in known if k]
+    for c in cited:
+        nc = _norm_cite(c)
+        if not nc:
+            continue
+        # 允许模型把标题写短/写长一点，但不允许指向一个不存在的标题
+        if not any(k in nc or nc in k for k in known):
+            return {"text": fallback, "source": "fallback"}
+    if not body:
+        return {"text": fallback, "source": "fallback"}
+    model = getattr(provider, "model", "") or getattr(provider, "name", "") or "llm"
+    return {"text": body, "source": "llm:%s" % model}
+
+
+def compose_answer_text(provider: LLMProvider, question: str,
+                        sources: Optional[List[Dict[str, Any]]] = None,
+                        *, max_chars: int = 600) -> str:
+    """把**已过闸门的资料**整理成回答文字（只要文字，不要来源标记）。
+
+    ★ 方向很重要：**"能不能答、凭哪几条答"已经在调用方（service.ask 的闸门）定死**，
+      本函数只负责"把这些资料说顺"。所以：
+
+      · ``sources`` 为空 → 返回 ``""``（调用方本就应该拒答，不该走到这里）；
+      · 无可用模型 → 回退 :func:`fallback_answer`（原文摘录，绝不空手而归）；
+      · 模型报错 / 超长 / **引用到未命中的标题** → 同样回退。
+
+    ★ 为什么用「引用可核验」而不是靠提示词自觉
+    ------------------------------------------
+    提示词说"不得编造"，但**没有判据**。这里要求模型在末行列出它用了哪几条资料，
+    然后**逐条比对**：只要出现一个不在 ``sources`` 里的标题，就认定它在编造来源，
+    整段作废、回退原文摘录。这是本项目一贯做法（判据要能证伪，不能只写在文档里）。
+
+    ⚠️ 诚实边界：本函数能挡住"编造来源"，但**挡不住"引用正确、内容却说错了"**
+       （语义蕴含不是字符串可判定的）。真正的最后防线仍是
+       ``requires_physician_confirmation`` 与医师复核。
+    """
+    return compose_answer(provider, question, sources, max_chars=max_chars)["text"]
+
+
 # ============================================================ 自检
 
 class _FakeProvider(LLMProvider):
@@ -325,6 +491,49 @@ def selftest() -> bool:
 
     check("系统提示词钉死了三条禁止", "严禁" in SYSTEM_GUARD
           and "诊断" in SYSTEM_GUARD and "编造" in SYSTEM_GUARD)
+
+    # ---- ★ 依据资料作答（2026-11-06 新增）。这一组是"能不能把话说出去"的判据，
+    #      每一条都对应一种真实失败：空回答 / 编造来源 / 超长跑偏 / 拒答路径误调模型。
+    src = [{"title": "成人发热的家庭处理与就医指征", "brief": "体温≥38.5℃可按说明书退热处理。",
+            "kind": "doc"},
+           {"title": "头痛的常见类型与就医时机", "brief": "突发最剧烈头痛须急诊。", "kind": "doc"}]
+
+    check("★ 无来源时不生成任何文字（拒答路径不该有正文）",
+          compose_answer_text(null, "发烧怎么办", []) == "")
+
+    fb = compose_answer_text(null, "发烧怎么办", src)
+    check("★ 无 LLM 时仍有正文（原文摘录，绝不空手）",
+          bool(fb.strip()) and "体温≥38.5℃" in fb, fb[:80])
+    check("★ 兜底正文只含资料原文与标题（不新增结论）",
+          "成人发热的家庭处理与就医指征" in fallback_answer(src))
+
+    ok_reply = _FakeProvider("发热时可先按说明书退热，出现呼吸困难须就医。\n"
+                             "依据：成人发热的家庭处理与就医指征")
+    got = compose_answer_text(ok_reply, "发烧怎么办", src)
+    check("★ 模型回答带合法依据时被采用",
+          "按说明书退热" in got and "依据" not in got, got[:80])
+
+    # ★★ 这一条是整组里最重要的：模型引用了一个**不存在**的资料标题。
+    #    靠提示词是挡不住的（模型会"看起来很自信"地编一个标题），必须由代码判退。
+    lie = _FakeProvider("可服用布洛芬，每日三次。\n依据：中华医学会发热诊疗指南（2019）")
+    got2 = compose_answer_text(lie, "发烧怎么办", src)
+    check("★ 引用不存在的资料 → 整段作废、回退原文摘录",
+          "中华医学会发热诊疗指南" not in got2 and "体温≥38.5℃" in got2, got2[:90])
+
+    no_cite = _FakeProvider("多喝水、注意休息就好。")
+    got3 = compose_answer_text(no_cite, "发烧怎么办", src)
+    check("★ 没写依据（未锚定）→ 回退原文摘录",
+          "多喝水" not in got3 and "体温≥38.5℃" in got3, got3[:90])
+
+    huge = _FakeProvider("啊" * 900 + "\n依据：成人发热的家庭处理与就医指征")
+    got4 = compose_answer_text(huge, "发烧怎么办", src)
+    check("★ 输出超长（跑偏）→ 回退原文摘录",
+          "啊" * 100 not in got4 and "体温≥38.5℃" in got4, got4[:60])
+
+    long_ok = _FakeProvider("发热先物理降温。\n依据：头痛的常见类型与就医时机")
+    got5 = compose_answer_text(long_ok, "发烧怎么办", src)
+    check("★ 引用另一条**存在**的资料也算合法（不是只认第一条）",
+          "物理降温" in got5, got5[:60])
 
     print("-" * 60)
     print("结果：%d 项通过，%d 项失败" % (ok, fail))

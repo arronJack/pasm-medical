@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 
 from . import safety
 from . import lab
+from . import llm
 from . import store as session_store
 from .consult import ConsultEngine, ConsultSession
 from .lab import LabItem, LabReport, OcrEngine
@@ -128,8 +129,23 @@ class MedicalService:
         self._store: session_store.SessionStore = store or session_store.MemorySessionStore()
         #: OCR 引擎（不配置时检验单功能不可用，但服务照常启动）
         self.ocr: Optional[Any] = None
+        #: ★ LLM provider 缓存（2026-11-06）。问答正文要用它把「已过闸门的资料」说顺。
+        #:   每次 ask 都重新 build 会重复解析环境变量、且 ``OllamaProvider.available()``
+        #:   自带 3s 探活 —— 逐问都付这笔钱会把问诊拖慢到不可用。
+        self._llm: Optional[Any] = None
 
     # ---------------------------------------------------------- 内部
+
+    def _llm_provider(self) -> Any:
+        """取（并缓存）本进程实际生效的 LLM provider。取不到就给 Null，绝不抛。"""
+        if self._llm is None:
+            from .llm import LLMConfig, build_provider
+            try:
+                self._llm = build_provider(LLMConfig.from_env())
+            except Exception:                     # noqa: BLE001
+                from .llm import NullProvider
+                self._llm = NullProvider()
+        return self._llm
 
     def _agent(self, patient_ref: str) -> str:
         return agent_id_for(self.tenant, patient_ref)
@@ -313,8 +329,15 @@ class MedicalService:
         所以闸门用的是结构判据：命中的词必须落在资料的**标题或标签**上。
         实现见 ``pasm_skills.cognition.relevance``（共享实现，非本项目私有）。
 
-        注意本方法**不生成自然语言结论** —— 那是 Spring Boot 侧接大模型之后的事。
-        这里只负责把"能不能答、凭哪几条答"判定清楚。
+        注意本方法**同时负责两件事**（2026-11-06 修正口径）：
+          ① "能不能答、凭哪几条答" —— 由相关性闸门判定，判据归本层；
+          ② "把这些依据说顺" —— 交给 :func:`llm.compose_answer_text`，
+             且**只在闸门放行后**才生成；拒答路径**绝不调模型**。
+
+        ★ 历史上这条注释写的是"本方法不生成自然语言结论，那是 Spring Boot 侧的事"，
+          结果两边都没做 —— 表现为"有来源、界面却是空气泡"。现在按铁律
+          「Python 侧是唯一实现」收回本层：Java 只做鉴权/透传/留痕（见 skill 铁律 1），
+          不在这里重写任何判据。
         """
         # ★ 两路召回：**患者私有记忆**（按患者分片）+ **机构资料库**（全院共享）。
         #   以前只召回记忆 —— 于是"资料库"对问答毫无影响，那它就只是个摆设。
@@ -345,11 +368,20 @@ class MedicalService:
                     **({"docKey": h["docKey"]} if h.get("docKey") else {}),
                     **({"score": h["score"]} if "score" in h else {})}
                    for h in keep]
-        guarded = safety.guard_answer("", sources, min_sources=1)
+        # ★ 先生成正文，再进护栏 —— 顺序不能反。
+        #   旧写法是 `guard_answer("", sources)`：有来源就放行，但**正文是空串**，
+        #   于是"有依据却答不出话"（界面一个空气泡）。这不是话术问题，是漏了一步。
+        #   仍要把生成结果交给 guard_answer：它才是"有没有依据"的最终判据，
+        #   生成层只是"怎么说"（见 llm.compose_answer 的三条约束）。
+        composed = (llm.compose_answer(self._llm_provider(), question, sources)
+                    if sources else {"text": "", "source": "refused"})
+        guarded = safety.guard_answer(composed["text"], sources, min_sources=1)
         d = guarded.to_dict()
         d.update({"ok": True, "agent_id": self._agent(patient_ref),
                   "hits": sources, "count": len(sources),
-                  "raw_count": len(raw), "gate": bool(use_gate)})
+                  "raw_count": len(raw), "gate": bool(use_gate),
+                  # ★ 这段文字是模型说的还是模板拼的 —— 审计要能区分（责任不同）。
+                  "answer_source": composed["source"]})
         return d
 
     def timeline(self, patient_ref: str, k: int = 20) -> List[Dict[str, Any]]:
@@ -428,7 +460,11 @@ class MedicalService:
                 continue
             out.append({
                 "title": h.get("title") or "",
-                "brief": str(h.get("content") or "")[:200],
+                # ★ 框架 kb.recall 返回的字段名是 **brief**（正文前 300 字），
+                #   不是 content —— 读错字段名会**静默**拿到空字符串：
+                #   表现为「有来源但没有正文」，而检索本身一切正常（不报错）。
+                #   两个名字都读：框架未来改回 content 也不至于悄悄断掉。
+                "brief": str(h.get("brief") or h.get("content") or "")[:200],
                 "tags": list(h.get("tags") or []),
                 "salience": 3,                # 机构资料比患者记忆更该被优先引用
                 "kind": "doc",
