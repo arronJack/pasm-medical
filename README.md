@@ -190,14 +190,14 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 | **受控学习 / 反馈作用面（P0.5）** | ✅ 医学动作后验落地（`pasm_medical/learning.py` 自包含 Beta-Bernoulli，绝不训练聊天动作池）：医生 `adopt/reject` 改接 `POST /api/feedback`，**只影响分诊候选排序、不碰安全规则**；否决后候选排序可观测变化、predict 概率 `<0.5`、非法 `decision` 返回 **400**；聊天动作池前缀被后验拒绝。验收 `tools/e2e_medical_learning.py`（14 项）+ `tools/falsify_medical_learning.py`（2 反例），已接入 `run_checks` ②b / ③b |
 | **自学习审核台（候选池 / 审核台 / 版本回滚）** | ✅ 2026-11-04 前移落地：`KbCandidateService` + `CandidateReviewController` + `V3__kb_candidates.sql`；每日批处理由 `MEDICAL_LEARNING_AUTO` 控制（默认关闭）。**2026-11-06 补齐 P0 合规根因**：Flyway `V5` 给就诊加**显式来源判据**（`AI_PRECONSULT` / `HUMAN_CONSULT_NO_CONCLUSION` / `PHYSICIAN_CONFIRMED` / `DEMO` / `LEGACY`），候选继承 `physicianConfirmed`，`approve()` 对无医师结论候选**硬拒 422**（原文字护栏可被一次点击绕过）；演示种子数据即使手工填齐判断/处置也标 `DEMO`，不能冒充。**合格数据源已具备**：坐诊台结束时由医师填写 `assessment/plan` 即落 `PHYSICIAN_CONFIRMED`。真实就诊评测 **74 项全绿**（见 [`docs/REAL-LEARNING-EVAL.md`](docs/REAL-LEARNING-EVAL.md)）；**生产仍保持关闭**，因为知识库内容仍需临床团队签核（见 [`docs/COMPLIANCE-GATE.md`](docs/COMPLIANCE-GATE.md)） |
 | **LIS / HL7 / FHIR 对接** | ✅ **已实现并验证**：`system_config.lis`（`off/hl7/fhir`）真正控制通道启停；HL7 v2 `ORU^R01` 解析（自定义分隔符 / 转义 / 时区沿用 MSH-7）与 FHIR `Observation`/`Bundle` 投递均落 `lab_results`，`(message_control_id, observation_seq)` **幂等**；`/api/fhir/**` 提供 R4 只读投影。**2026-11-06 补 MLLP over TCP 直连 + HL7 `ACK^R01`**（默认关闭、仅绑回环、`AA/AE/AR` 三态、MSA-2 回显控制号、令牌走 `ZAT` 段且入库前剥离、fail closed）；两条通道**共用 `LisIngestService.ingest()`**，不会判定漂移；e2e 真开两个 TCP 端口验 15 项。机器通道用**独立共享密钥** `MEDICAL_LIS_TOKEN`（未配置即关闭），与用户 JWT 分离；未实现边界（LOINC 映射、跨机网络准入、TLS）见 [`docs/INTEGRATION-LIS-FHIR.md`](docs/INTEGRATION-LIS-FHIR.md) §3.6 / §7 |
-| **数据库迁移** | ✅ Flyway 版本化迁移 `V1`~`V5`（初始化 / 检验结果 / 候选池 / 科室与人工会话 / **医师确认来源判据**），`ddl-auto=validate`；dev(H2) 与生产共用同一份脚本，避免结构静默漂移。真 PostgreSQL 验证：嵌入式 PG 上的迁移测试 + 整应用启动测试 + LIS 集成测试 + 候选闸门测试 |
+| **数据库迁移** | ✅ Flyway 版本化迁移 `V1`~`V6`（初始化 / 检验结果 / 候选池 / 科室与人工会话 / **医师确认来源判据** / **影像归档**），`ddl-auto=validate`；dev(H2) 与生产共用同一份脚本，避免结构静默漂移。真 PostgreSQL 验证：嵌入式 PG 上的迁移测试 + 整应用启动测试 + LIS 集成测试 + 候选闸门测试 + **影像归档 6 项反例对照** |
 | **投产合规门禁** | ✅ 2026-11-06：`ProductionGate` 启动自检（默认 WARN 不拦，避免 dev/测试集体起不来；`MEDICAL_PRODUCTION_GATE_STRICT=true` 时任一 BLOCK 项**阻止启动**）+ [`docs/COMPLIANCE-GATE.md`](docs/COMPLIANCE-GATE.md) 人工签核清单。**代码能判的只有配置组合**；器械分类/NMPA/等保/伦理/临床复核属机构流程，代码不假装能判 |
-| 影像归档 | 未开始（P5，**只做归档与转交，不做分析**） |
+| **影像归档 + 转交** | ✅ 2026-11-06 落地（`imaging_studies` + Flyway `V6` + `ImagingController` + `ImagingArchiveView`）：患者上传原始影像**原样存档**（按服务端 UUID 落盘 + SHA-256 完整性核对，服务端**不解码像素**），医护侧可**转交**给科室。**刻意不做分析**：表与实体**没有任何结论字段**，入参带 `impression`/`airesult`/`report`/`findings`/`conclusion`/`analysis` 等结论字段一律 **400 ANALYSIS_FORBIDDEN**（两个写入口都挡）；反例对照已证明边界失效时断言精确转红。⚠ **部署缺口**：当前落本地目录（`medical.imaging.dir`，默认 `.demo/imaging`），生产应换 PACS / MinIO 适配器 + 加密与留存策略（见 `docs/GUIDE.md` §影像）；前端「影像」入口两侧皆可用，但**仍不参与任何自动诊断** |
 | 中医知识库 | 未开始（见 `docs/PLAN.md` §6） |
 | AI 问答流式输出 | 未开始（SSE 目前只覆盖**坐诊双向消息**；AI 问答仍一次性响应） |
 | 多主机会话共享 | 未开始（`SessionStore` 单机内存；扩容需接 Redis/DB） |
 
-**验证体系（2026-11-06）**：`run_checks.py --full` 把 **17 套**一次性串起来 —— 模块自检 **97 项**（14+16+24+23+11+9）+ 认知端到端 **19 项** + 学习端到端 **14 项** + 反例对照 **5 处 / 学习反例 2 处**（故意改坏必须被抓到）+ 三端联调 **131 项** + MCP selftest **23 项** + 前端 `vue-tsc` / `vite` 构建 0 错误 + 后端真 PostgreSQL 测试（迁移 / 整应用 / 候选审核台 / LIS 集成 / HL7 解析 / **MLLP 协议 10 项** / **投产门禁 8 项**）+ **MCP stdio e2e 15 项** + **真实就诊数据自学习评测 74 项** + **分发形态冒烟 9 项**。后三套此前「有脚本但没编进一键验证」，现已纳入 `--full`，不再靠人记得手动跑。
+**验证体系（2026-11-06）**：`run_checks.py --full` 把 **17 套**一次性串起来 —— 模块自检 **97 项**（14+16+24+23+11+9）+ 认知端到端 **19 项** + 学习端到端 **14 项** + 反例对照 **5 处 / 学习反例 2 处**（故意改坏必须被抓到）+ 三端联调 **131 项** + MCP selftest **23 项** + 前端 `vue-tsc` / `vite` 构建 0 错误 + 后端真 PostgreSQL 测试（迁移 / 整应用 / 候选审核台 / LIS 集成 / HL7 解析 / **MLLP 协议 10 项** / **投产门禁 8 项** / **影像归档 6 项反例对照**）+ **MCP stdio e2e 15 项** + **真实就诊数据自学习评测 74 项** + **分发形态冒烟 9 项**。后三套此前「有脚本但没编进一键验证」，现已纳入 `--full`，不再靠人记得手动跑。
 
 > **启动、部署、配置、排障**见 [`docs/GUIDE.md`](docs/GUIDE.md)；
 > **功能说明**（每个功能在做什么、边界在哪）也在同一份文档里。
@@ -219,8 +219,9 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 见 [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md)。
 
 > 一句话结论：**能，而且不用赌任何未成熟技术。**
-> 唯一要放弃的是"AI 自己读片下结论"——换成"归档 + 接已有资质厂商 + 结构化转交"，
-> 临床价值几乎不损失，风险降一个量级。
+> 影像这块的取舍已经落到代码里：本系统**只做归档与转交**（患者上传原样存档、医护侧转交科室），
+> 服务端不解像素、表与接口都**没有任何结论字段**，入参带结论字段直接 400——「不做分析」是硬边界而非口号。
+> 真正的读片/诊断交给具备三类证的厂商或医师。
 
 ## 开源与许可
 
@@ -233,8 +234,9 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 
 > ⚠️ **许可范围提示**：MIT 覆盖的是**代码**。但把这个系统用于实际诊疗场景，
 > 涉及的是**医疗器械合规**（见 [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md) §2）——
-> 代码开源不等于可以合法用于临床诊断。尤其是**影像自动诊断**那一项，
-> 本仓库**没有**也不打算实现（不建议自研，需三类医疗器械注册证）。
+> 代码开源不等于可以合法用于临床诊断。影像「自动诊断」本仓库**刻意不做**
+> （无三类证；只归档+转交），且这一边界已由代码强制 + 反例对照证明，不是靠自觉；
+> 影像文件的落盘当前是本地目录，生产须接 PACS/MinIO 并补加密/留存，否则不能算「已解决」。
 >
 > 仓库内 `pasm_medical/safety.py` 的规则表（十八反 / 十九畏 / 妊娠禁忌 / 毒性剂量）
 > 是药典与教材的经典内容，用于**演示与初版落地**，**未经临床药师复核**。

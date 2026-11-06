@@ -84,8 +84,9 @@
 > 且 2026-11-05 完成一轮真实就诊数据评测（71 项全绿；**2026-11-06 补 V5 医师确认闸门后为 74 项**）；
 > 医师确认结论的采集链路与采纳闸门**已落地**（坐诊台 `close` → `PHYSICIAN_CONFIRMED` → 可采纳），
 > 但每日批处理生产仍保持关闭：剩余瓶颈是**知识库内容需临床团队签核**，属机构流程
-> （见 [COMPLIANCE-GATE.md](COMPLIANCE-GATE.md) 与 §8.4）。**P4 / P5**（影像归档 / 中医知识库）
-> 与合规界定仍按路线图推进。
+> （见 [COMPLIANCE-GATE.md](COMPLIANCE-GATE.md) 与 §8.4）。**P4 / P5** 中**影像归档已于 2026-11-06 落地**
+> （纯归档+转交、不做分析，代码级硬边界 + 6 项 PG 反例对照）；**中医知识库**仍未开始。
+> 合规界定仍按路线图推进。
 
 > 前提假设（如与你的想法不符请指出，方案会随之调整）：
 > ① 定位为**医生辅助决策支持（CDSS）**，不是"AI 医生"；
@@ -262,7 +263,7 @@ GET  /api/cog/status       后端可用性 / 规模 / 版本
 - ★ **用 FHIR 标准，不要自造 schema**：`Patient` / `Encounter` / `Condition` /
   `Observation` / `MedicationRequest` / `DiagnosticReport`。
   自造 schema 后面对接 HIS / EMR / 区域平台会**大面积返工**。
-- 影像走 **DICOM**；音视频原始文件进 MinIO，库里只存引用 + 特征。
+- 影像走 **DICOM**；原始文件**当前落本地目录**（`medical.imaging.dir`），生产应进 MinIO / 对象存储（库里只存 `storage_key` 引用 + SHA-256 完整性核对）。⚠ **本系统只归档 + 转交、不做任何自动分析**（无三类证；表/接口无结论字段，结论字段入参 400 硬拒）—— 读片/诊断交给具备资质的厂商或医师。
 - **审计库独立**（append-only，最好只写权限），与业务库物理隔离。
 - 向量库：`pgvector` 起步够用；量级上去再上 Milvus。
 - 全文检索：ES 或 PG + `zhparser`。

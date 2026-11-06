@@ -85,6 +85,14 @@ medical:
       read-timeout-ms: ${MEDICAL_LIS_MLLP_READ_TIMEOUT_MS:10000}
       max-connections: ${MEDICAL_LIS_MLLP_MAX_CONNECTIONS:8}
 
+  # ── 影像归档（只归档 + 转交，绝不分析）────────────────────────────
+  # ★ 原始字节落本地目录，库里只存相对 key + sha256；服务端不解码图像。
+  #   生产必须换成 PACS / MinIO 适配器并补加密、留存与跨主机共享（见 GUIDE）。
+  imaging:
+    dir: ${MEDICAL_IMAGING_DIR:.demo/imaging}
+    # 单文件上限（字节，默认 5 MiB）：避免用 HTTP 接口搬运 DICOM 大文件。
+    max-bytes: ${MEDICAL_IMAGING_MAX_BYTES:5242880}
+
   # ── 自学习审核台（PLAN §8 候选池）──────────────────────────────────
   # 每日批处理默认**关闭**：自动跑会扫全库就诊写候选池，生产应在低峰期手动触发，
   # 或由运维在 supervisor/cron 里按机构节奏触发；避免"忘记配置就自动跑"带来的噪声。

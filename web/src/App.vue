@@ -7,8 +7,14 @@
         <span class="tag">辅助工具 · 非诊断</span>
       </div>
       <nav v-if="me">
-        <RouterLink v-if="side === 'patient'" to="/consult">问诊</RouterLink>
-        <RouterLink v-else to="/admin">后台</RouterLink>
+        <template v-if="side === 'patient'">
+          <RouterLink to="/consult">问诊</RouterLink>
+          <RouterLink to="/imaging">影像</RouterLink>
+        </template>
+        <template v-else>
+          <RouterLink to="/admin">后台</RouterLink>
+          <RouterLink to="/imaging">影像</RouterLink>
+        </template>
       </nav>
       <div class="spacer" />
       <span v-if="me" class="who">

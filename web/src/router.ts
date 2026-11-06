@@ -4,6 +4,7 @@ import { ensureIdentity, landingFor, sideOf } from './identity'
 import LoginView from './views/LoginView.vue'
 import ConsultView from './views/ConsultView.vue'
 import AdminView from './views/AdminView.vue'
+import ImagingView from './views/ImagingView.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -13,6 +14,8 @@ export const router = createRouter({
     // `side` 与身份的四角色对应：患者侧 / 医护侧
     { path: '/consult', component: ConsultView, meta: { side: 'patient' } },
     { path: '/admin', component: AdminView, meta: { side: 'clinical' } },
+    // 影像：患者上传本人 + 医护侧转交，两侧皆可用（服务端的双层授权仍各自收窄）
+    { path: '/imaging', component: ImagingView },
   ],
 })
 

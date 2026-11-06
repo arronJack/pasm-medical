@@ -383,6 +383,45 @@ export const api = {
     call<AdminConfigView>('/admin/config', {
       method: 'POST', body: JSON.stringify(cfg),
     }),
+
+  // ── 影像归档 + 转交（只归档/转交，**不做分析**；无三类证，见 COMPLIANCE-GATE §3）──
+  /**
+   * 归档一条影像检查。`contentBase64` 为原始字节。
+   * ★ 结论类字段（impression / airesult / report / findings / conclusion / analysis …）
+   *   服务端一律 400 拒绝 —— 这是「本系统不做影像分析」的硬边界，不是文档里的一句话。
+   */
+  imagingArchive: (body: {
+    patientRef?: string; modality: string; bodyPart: string; fileName: string
+    contentType: string; contentBase64: string; studyDate?: string; accessionNo?: string; department?: string
+  }) => call<ImagingStudy>('/imaging/studies', { method: 'POST', body: JSON.stringify(body) }),
+  /** 列表：患者本人（不传 ref）；医护可传 ref 指定患者。 */
+  imagingList: (ref?: string) =>
+    call<ImagingStudy[]>('/imaging/studies' + (ref ? '?ref=' + encodeURIComponent(ref) : '')),
+  imagingDetail: (id: number) => call<ImagingStudy>('/imaging/studies/' + id),
+  /** 下载原始字节（不透明传输，服务端不解码、不推理）。触发浏览器下载。 */
+  imagingContent: async (id: number, fileName = 'study.bin'): Promise<void> => {
+    const t = getToken()
+    const r = await fetch('/api/imaging/studies/' + id + '/content', {
+      headers: t ? { Authorization: 'Bearer ' + t } : {},
+    })
+    if (r.status === 403) throw new Error('没有权限')
+    if (r.status === 404) throw new Error('记录不存在')
+    if (!r.ok) throw new Error(String(r.status))
+    const blob = await r.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+    a.click()
+    URL.revokeObjectURL(url)
+  },
+  /** 待转交队列（仅医护侧）。 */
+  imagingQueue: () => call<ImagingStudy[]>('/imaging/queue'),
+  /** 转交给科室（仅医护侧；已转交 409）。 */
+  imagingHandoff: (id: number, department: string, note?: string) =>
+    call<ImagingStudy>('/imaging/studies/' + id + '/handoff', {
+      method: 'POST', body: JSON.stringify({ department, note }),
+    }),
 }
 
 export interface EncounterDetail {
@@ -475,4 +514,29 @@ export interface LabReport {
   report_key: string; items: LabItem[]; needs_confirmation: boolean
   critical: { count: number; forced: boolean; advice: string }
   disclaimer: string
+}
+
+/** 影像归档记录（白名单视图：没有任何结论字段，且显式声明 noAnalysis）。 */
+export interface ImagingStudy {
+  id: number
+  patientRef: string
+  modality: string
+  bodyPart: string
+  studyDate: string
+  accessionNo: string
+  department: string
+  fileName: string
+  contentType: string
+  byteSize: number
+  sha256: string
+  status: 'ARCHIVED' | 'HANDED_OFF'
+  handoffDepartment: string
+  handoffNote: string
+  handoffBy: string
+  handoffAt: string
+  uploadedBy: string
+  createdAt: string
+  /** ★ 显式声明「没有分析」，而非让前端从缺字段去猜 */
+  noAnalysis: boolean
+  notice: string
 }

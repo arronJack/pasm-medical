@@ -17,7 +17,7 @@
 |---|---|
 | ❌ 不下诊断结论 | 面向患者的诊断属医疗器械（SaMD），且触碰「AI 不得替代医师本人提供诊疗服务」 |
 | ❌ 不开处方 / 不给用药建议 | 同上；用药只做**规则核对**（配伍禁忌、剂量上限），不产出方剂 |
-| ❌ 不解读影像（X光/CT） | 通用视觉大模型会**自信地编造影像所见**；真正能读片的模型须三类医疗器械注册证。影像**只归档 + 转交** |
+| ❌ 不解读影像（X光/CT） | 通用视觉大模型会**自信地编造影像所见**；真正能读片的模型须三类医疗器械注册证。影像**只归档 + 转交**—— 该边界已落在代码里：表与接口**无结论字段**，入参带 `impression`/`airesult`/`report`/`findings`/`conclusion`/`analysis` 等结论字段一律 **400 ANALYSIS_FORBIDDEN**（含反例对照，证明边界失效即断言转红） |
 
 ---
 
@@ -278,6 +278,34 @@ ack = s.recv(4096)             # 回一帧 MLLP 封装的 ACK^R01
 
 字段映射、拒收规则、未实现边界见 [`INTEGRATION-LIS-FHIR.md`](INTEGRATION-LIS-FHIR.md) §3.6 / §7。
 端到端 15 项断言（真开两个 TCP 端口）在 `tools/e2e_stack.py` 末段。
+
+### 3.8 影像归档与转交 — 2026-11-06 落地（**只归档，绝不分析**）
+
+本系统对影像**只做两件事**：把患者上传的原始文件**原样存档**、让医护把它**转交**给科室。
+**不做任何形式的自动分析 / 读片 / 影像所见 / 印象 / 结论**——自动读片属高风险诊断行为，
+需三类医疗器械注册证，本仓库**没有也不打算自研**。
+
+★ 这条边界不是写在文档里的口号，而是**三道代码约束**（反例对照已证明失效即断言转红）：
+
+1. `imaging_studies` 表与 `ImagingStudy` 实体**没有任何结论字段**——没有字段，就不存在
+   「某天顺手把模型结论写进来」的旁路；
+2. 入参出现 `impression` / `airesult` / `report` / `findings` / `conclusion` / `analysis`
+   等结论字段，两个写入口（`POST /api/imaging/studies`、`…/handoff`）一律 **400 ANALYSIS_FORBIDDEN**；
+3. 原始文件按**服务端生成的 UUID** 落盘，读取时只做整块字节返回，没有任何解码/推理调用点。
+
+| 接口 | 说明 | 授权 |
+|---|---|---|
+| `POST /api/imaging/studies` | 归档一条检查（`contentBase64` 为原始字节） | 患者本人 / 医护代录 |
+| `GET  /api/imaging/studies` | 列表（患者不传 `ref`=本人；医护传 `ref`) | 按身份收窄 |
+| `GET  /api/imaging/studies/{id}` | 详情（不含字节） | 患者只能看自己；拿别人 id → 404（不当存在性预言机） |
+| `GET  /api/imaging/studies/{id}/content` | 下载原始字节（不透明传输，不解码） | 同上 |
+| `GET  /api/imaging/queue` | 待转交队列（仅医护侧） | 临床侧；超管全院、其余按本科室 + 未指定科室 |
+| `POST /api/imaging/studies/{id}/handoff` | 转交科室（已转交 → 409；未知科室 → 400） | 仅医护侧 |
+
+**部署缺口（如实标注，不算「已解决」）**：当前原始文件落**本地目录**（`medical.imaging.dir`，
+默认 `.demo/imaging`），生产应替换为 **PACS / MinIO 适配器**并补加密、留存策略与跨主机共享；
+`medical.imaging.max-bytes` 默认 5 MB，大文件应由对象存储直传、不走接口搬运。
+测试覆盖：`ImagingArchiveTest`（嵌入式 PG，**6 项**，含「结论字段入参 400」的 break→red→restore）。
 
 ---
 
@@ -799,7 +827,7 @@ Python 进程里，由 `PASM_MEDICAL_LLM*` 环境变量决定。两者不一致�
 | MCP stdio sidecar（`pasm_medical/mcp/`） | ✅ 已建并验证（selftest 23 项 + 三端 e2e 131 项）；复用 `MedicalService` 门面，不启 HTTP 零端口污染 |
 | Spring Boot 业务层 | ✅ 已编译、已启动、三端联调全过；JPA 持久化（患者 / 就诊 / 审计 / **对接设置**）+ 真实管理接口（`/api/admin/*`、`/api/patient`、`/api/patient/encounters`、`/api/patient/encounter/{id}`、`/api/admin/config`、`/api/auth/me`）；**后台限医护侧（配置仅超管、资料库按科室授权）+ 按身份收窄数据范围** |
 | 前端 | ✅ 三栏工作台 + 医护后台，**全部接通真实后端**（登录 / 问诊 / 检验单 / 反馈 / 患者档案 / 历史就诊详情 / 后台患者·统计·审计·对接设置），构建通过、零 TS 错误 |
-| 影像 | ❌ 不做分析，只归档 + 转交 |
+| 影像 | ✅ **归档 + 转交已实现**（2026-11-06：`imaging_studies` + Flyway `V6` + `ImagingController` + 前端「影像」入口）；❌ **不做任何分析**—— 表/接口无结论字段，结论字段入参 400 硬拒（反例对照证明）。⚠ 落盘为本地目录，生产须接 PACS/MinIO（见 §影像部署） |
 | 合规 | ❌ 未做医疗器械分类界定；规则表**未经临床药师复核** |
 
 > ✅ **已解决（P1-1，2026-09-23）**：带 `ref` 的接口**不再只校验「已认证」**，而是先过
