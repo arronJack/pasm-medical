@@ -105,6 +105,14 @@ class CandidatePostgresTest {
     }
 
     private void seedEncounter(String dept, String cc, String assess, String plan) {
+        seedEncounter(dept, cc, assess, plan, Encounter.SRC_PHYSICIAN_CONFIRMED);
+    }
+
+    /**
+     * ★ 显式传 source：默认 PHYSICIAN_CONFIRMED（这些用例构造的就是「医师填了判断/处置」）。
+     *   反例用 AI_PRECONSULT / DEMO / LEGACY —— 验证「字段填齐了也不能冒充医师确认」。
+     */
+    private void seedEncounter(String dept, String cc, String assess, String plan, String source) {
         Encounter e = new Encounter();
         e.setPatientRef("CAND-" + System.nanoTime());
         e.setOccurredAt(java.time.Instant.now());
@@ -112,6 +120,7 @@ class CandidatePostgresTest {
         e.setChiefComplaint(cc);
         e.setAssessment(assess);
         e.setPlan(plan);
+        e.setSource(source);
         e.setTriageUrgency("routine");
         e.setSummaryText("主诉：" + cc + "；判断：" + assess + "；处置：" + plan);
         encounters.save(e);
@@ -159,6 +168,59 @@ class CandidatePostgresTest {
                 .findFirst().orElseThrow();
         mvc.perform(auth(post("/api/admin/kb/candidates/" + orthoId + "/approve"), deptToken))
                 .andExpect(status().isForbidden());
+    }
+
+    /**
+     * ★★ 合规闸门反例对照（Flyway V5）：**字段填齐了也不能冒充医师确认**。
+     *   旧实现只看 assessment/plan 是否非空，于是 DemoDataSeeder 手工填齐的演示数据
+     *   会被当成「医师结论」，超管点一下采纳就写进 knowledge_docs。
+     *   本用例对三种非医师来源逐一验证 422，并确认知识池版本与资料库都没被改动。
+     */
+    @Test
+    void approveBlockedUnlessPhysicianConfirmed() throws Exception {
+        for (String src : new String[]{Encounter.SRC_AI_PRECONSULT,
+                Encounter.SRC_DEMO, Encounter.SRC_LEGACY,
+                Encounter.SRC_HUMAN_NO_CONCLUSION}) {
+            candRepo.deleteAll();
+            encounters.deleteAll();
+            seedEncounter("发热门诊", "未确认" + src, "自述判断", "自述处置", src);
+
+            mvc.perform(auth(post("/api/admin/kb/candidates/generate?days=30"), superToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.generated").value(1))
+                    .andExpect(jsonPath("$.physicianConfirmed").value(0))
+                    .andExpect(jsonPath("$.ineligible").value(1));
+
+            List<Map<String, Object>> pending = listCandidates(superToken, "PENDING");
+            assertEquals(1, pending.size(), src);
+            assertEquals(Boolean.FALSE, pending.get(0).get("physicianConfirmed"), src);
+            long id = ((Number) pending.get(0).get("id")).longValue();
+
+            mvc.perform(auth(post("/api/admin/kb/candidates/" + id + "/approve"), superToken))
+                    .andExpect(status().isUnprocessableEntity())
+                    .andExpect(jsonPath("$.code").value("NOT_PHYSICIAN_CONFIRMED"));
+
+            // 绝不入库：候选仍是 PENDING，知识池版本还是 1
+            assertEquals("PENDING", listCandidates(superToken, "PENDING").get(0).get("status"), src);
+            JsonNode pv = om.readTree(mvc.perform(auth(get("/api/admin/kb-pool/version"), superToken))
+                    .andReturn().getResponse().getContentAsString());
+            assertEquals(1, pv.get("version").asInt(), src);
+        }
+    }
+
+    /** 正例：坐诊台医师确认的就诊产生的候选可采纳。 */
+    @Test
+    void physicianConfirmedCandidateCanBeApproved() throws Exception {
+        seedEncounter("发热门诊", "医师确认F", "急性上呼吸道感染", "对症退热并随诊");
+        mvc.perform(auth(post("/api/admin/kb/candidates/generate?days=30"), superToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.physicianConfirmed").value(1))
+                .andExpect(jsonPath("$.ineligible").value(0));
+        long id = ((Number) listCandidates(superToken, "PENDING").get(0).get("id")).longValue();
+        assertEquals(Boolean.TRUE, listCandidates(superToken, "PENDING").get(0).get("physicianConfirmed"));
+        mvc.perform(auth(post("/api/admin/kb/candidates/" + id + "/approve"), deptToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.poolVersion").value(2));
     }
 
     // ------------------------------------------------------------ 冲突检测挂起

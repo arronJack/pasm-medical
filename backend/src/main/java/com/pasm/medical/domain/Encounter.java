@@ -20,6 +20,17 @@ import java.time.Instant;
 @Table(name = "encounters")
 public class Encounter {
 
+    /** AI 预问诊结束：按合规不含医师结论，**不可**作为自学习依据。 */
+    public static final String SRC_AI_PRECONSULT = "AI_PRECONSULT";
+    /** 人工坐诊结束但医师未填判断/处置：仍不可作为依据。 */
+    public static final String SRC_HUMAN_NO_CONCLUSION = "HUMAN_CONSULT_NO_CONCLUSION";
+    /** ★ 人工坐诊结束且医师填写了判断或处置 —— 唯一合格的医师确认来源。 */
+    public static final String SRC_PHYSICIAN_CONFIRMED = "PHYSICIAN_CONFIRMED";
+    /** 演示种子数据：绝不作为依据（演示数据把判断/处置手工填齐了，极易误判）。 */
+    public static final String SRC_DEMO = "DEMO";
+    /** V5 之前的历史行：保守起见不可采纳。 */
+    public static final String SRC_LEGACY = "LEGACY";
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -50,6 +61,20 @@ public class Encounter {
     @Column(length = 4000)
     private String summaryText;
 
+    /**
+     * 就诊来源（Flyway V5）。★ 判据是**显式来源**，不是「assessment 非空」：
+     * 演示种子数据把判断/处置填齐了，只看字段会把演示数据误判成医师确认。
+     */
+    @Column(length = 32, nullable = false)
+    private String source = SRC_LEGACY;
+
+    /** 本条就诊是否具备「医师确认后的判断/处置」。 */
+    public boolean isPhysicianConfirmed() {
+        return SRC_PHYSICIAN_CONFIRMED.equals(source)
+                && ((assessment != null && !assessment.isBlank())
+                    || (plan != null && !plan.isBlank()));
+    }
+
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
 
@@ -76,4 +101,7 @@ public class Encounter {
 
     public String getSummaryText() { return summaryText; }
     public void setSummaryText(String summaryText) { this.summaryText = summaryText; }
+
+    public String getSource() { return source; }
+    public void setSource(String source) { this.source = source; }
 }

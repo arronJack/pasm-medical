@@ -41,6 +41,22 @@ public class ChatStreamService {
         });
         emitter.onError(t -> remove(sessionId, emitter));
         bySession.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>()).add(emitter);
+
+        // ★★ 必须立刻推一个「首帧」，否则 SSE 连响应头都发不出去。
+        //   SseEmitter 只在第一次 send() 时才 flush 并 commit HTTP 响应头；若订阅时
+        //   afterId 已是最后一条消息（补发循环为空），整个流在此之前零字节 ——
+        //   浏览器 fetch() 的 Promise 不会 resolve、原生客户端 getresponse() 会一直阻塞，
+        //   直到 15s 心跳才「看起来连上了」。症状是「连接建立偶发超时/一直显示重连中」。
+        //   Spring 会把 initialize 之前的 send 缓存为 earlySendAttempts，返回 emitter 时重放，
+        //   所以这里提前 send 是安全的。data 用 JSON，前端只处理 message/session 事件，
+        //   ready 会被自然忽略；e2e 用它断言「首帧不依赖任何新消息」。
+        try {
+            emitter.send(SseEmitter.event().name("ready")
+                    .data(Map.of("sessionId", sessionId, "ts", System.currentTimeMillis())));
+        } catch (IOException | IllegalStateException ex) {
+            remove(sessionId, emitter);
+            try { emitter.complete(); } catch (Exception ignored) { }
+        }
         return emitter;
     }
 

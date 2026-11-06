@@ -242,10 +242,15 @@ def render_report(report: dict) -> str:
         "- 候选生成：%s；指纹去重、冲突挂起、审核闸门、版本回滚均按设计工作。" % report.get("genSummary", "（未执行）"),
         "- 配套回归：`tools/e2e_stack.py` 已补 **7 项真实链路落库断言**（74 → 81 项，防演示数据假绿）；"
         "全量 `run_checks.py --web --java` **14 项套件全绿**（含后端真库测试与前端构建）。",
-        "- **数据资格限制（本轮最重要的结论）**：预问诊摘要按合规不含医师结论，"
-        "故本轮产出的候选正文是「患者自述 + 分诊建议」，**不具备作为机构回答依据的资格**。"
-        "已给这类候选加显著警示护栏；真正合格的自学习输入应是「医师确认后的判断/处置」，"
-        "该链路目前不存在，属 P3 待办。在此之前 `MEDICAL_LEARNING_AUTO` 于生产应保持关闭。",
+        "- **数据资格限制与结构性闸门（本轮最重要的结论）**：预问诊摘要按合规不含医师结论，"
+        "本轮产出的候选正文是「患者自述 + 分诊建议」，**不具备作为机构回答依据的资格**。"
+        "★ 2026-11-05 已把「医师确认后的判断/处置」链路补齐：坐诊台结束会话时由接诊医师"
+        "填写判断/处置，`Encounter.source=PHYSICIAN_CONFIRMED`（Flyway V5），候选继承该判据；"
+        "`approve()` 对未确认候选**硬拒 422**（`NOT_PHYSICIAN_CONFIRMED`），与文字护栏、"
+        "与 `MEDICAL_LEARNING_AUTO` 开关都无关 —— 误开开关也只会生成候选，不会污染知识库。"
+        "本轮已核验「预问诊候选一律被拒且库/版本分毫不动」。"
+        "**生产仍保持关闭**：代码侧闸门已就位，但临床药师复核、器械分类界定、等保等"
+        "机构流程尚未完成（见 `docs/COMPLIANCE-GATE.md`），这些不是代码能替代的。",
         "- 表中回答为合成文本、按问诊树顺序填入，语义与要素名未必对应"
         "（如「体温：两天前开始的」）；本轮只验**数据通路与字段完整性**，不验临床语义正确性。",
         "",
@@ -286,8 +291,14 @@ def render_report(report: dict) -> str:
         "3. **红旗中断路径没有 `suggested_department`（如实标注，未改）**："
         "`ConsultSession.triage()` 命中红旗时只返回 `urgency/advice/reason`，"
         "故该就诊 `department` 为空、其候选按设计仅超管可见。这是认知侧既有结构，不是落库丢字段。",
-        "4. **候选数据资格不足（已加护栏，根治属 P3）**：见「结论先行」。"
-        "审核台的人工闸门是最后一道防线，候选绝不自动生效（本轮已核验）。",
+        "4. **候选数据资格不足（★ 已结构性根治，不再是「待办」）**：旧的文字护栏"
+        "【预问诊采集·非医师结论】只是给人看的，超管点一下「采纳」就能绕过 —— "
+        "这是比不设防更危险的假校验。修法分三层：① 就诊显式标 `source`"
+        "（Flyway V5），演示数据填齐判断/处置也只标 `DEMO`；② 候选继承"
+        "`physicianConfirmed`；③ `approve()` 作为唯一生效入口硬拒未确认候选（422）。"
+        "本轮已核验：预问诊候选采纳被拒、库与知识池版本分毫不动；"
+        "医师确认候选可采纳（后端真库正例）。生产开关仍关闭是**机构流程**未完，"
+        "不是代码缺口。",
         "",
         "### 运行时观察",
         "",
@@ -477,19 +488,32 @@ def main() -> int:
         check("二次生成 deduplicated = 首轮 generated（指纹去重生效）",
               gen2.get("deduplicated") == generated, str(gen2)[:180])
 
-        # ---------- 8) 审核闸门：采纳才入库 / 驳回不入库
+        # ---------- 8) ★ 合规闸门（2026-11-05 结构性升级，替代旧的「采纳即入库」）
+        #   旧断言把「预问诊采集」候选当成合格知识采纳了 —— 那正是 P0 根因：
+        #   患者自述 + 分诊建议被写进机构回答依据。现在 approve() 有硬闸门，
+        #   这里改成验证「预问诊候选一律被拒、且库与版本分毫不动」。
+        check("★ 真实预问诊候选全部标记为非医师确认",
+              bool(fresh) and all(c.get("physicianConfirmed") is False for c in fresh),
+              str([c.get("physicianConfirmed") for c in fresh]))
+        check("★ generate 报告如实区分可采纳 / 不可采纳条数",
+              gen.get("physicianConfirmed") == 0 and gen.get("ineligible") == generated,
+              "physicianConfirmed=%s ineligible=%s generated=%s"
+              % (gen.get("physicianConfirmed"), gen.get("ineligible"), generated))
         pending = [c for c in fresh if c.get("status") == "PENDING"]
-        if check("至少 2 条 PENDING 供采纳/驳回对照", len(pending) >= 2,
+        if check("至少 2 条 PENDING 供闸门/驳回对照", len(pending) >= 2,
                  "pending=%d" % len(pending)):
             st, ap = req("POST", base + "/api/admin/kb/candidates/%s/approve" % pending[0]["id"],
                          {}, token=token)
-            check("采纳后知识池版本 +1",
-                  st == 200 and ap.get("poolVersion") == pv0.get("version", 1) + 1,
-                  str(ap)[:180])
+            check("★ 合规闸门：预问诊候选采纳被 422 拒绝（不是 409/403）",
+                  st == 422 and ap.get("code") == "NOT_PHYSICIAN_CONFIRMED",
+                  str(st) + " " + str(ap)[:180])
             st, kb2 = req("GET", base + "/api/admin/kb", token=token)
-            check("采纳后资料才进 knowledge_docs",
-                  any(d["docKey"] == ap.get("docKey") for d in kb2.get("docs", [])),
-                  str(ap.get("docKey")))
+            check("★ 被拒后患者自述绝不进 knowledge_docs",
+                  {d["docKey"] for d in kb2.get("docs", [])} == kb0_keys,
+                  str({d["docKey"] for d in kb2.get("docs", [])} - kb0_keys))
+            st, pv_gate = req("GET", base + "/api/admin/kb-pool/version", token=token)
+            check("★ 被拒后知识池版本不变（闸门没偷偷 bump）",
+                  pv_gate.get("version") == pv0.get("version"), str(pv_gate))
             st, rj = req("POST", base + "/api/admin/kb/candidates/%s/reject" % pending[1]["id"],
                          {}, token=token)
             st, kb3 = req("GET", base + "/api/admin/kb", token=token)

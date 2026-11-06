@@ -92,9 +92,11 @@ def read_tail(path: str, n: int = 2500) -> str:
         return "（日志读不到：%s）" % ex
 
 
-def req(method, url, body=None, token=None, timeout=25):
+def req(method, url, body=None, token=None, timeout=25, accept="application/json"):
     data = None
-    h = {"Accept": "application/json"}
+    # ★ FHIR 端点 produces=application/fhir+json，普通 /api/** 是 application/json。
+    #   硬编码一个 Accept 会让 FHIR 读直接 406 —— 这不是业务失败，是测试契约盲区。
+    h = {"Accept": accept}
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode()
         h["Content-Type"] = "application/json; charset=utf-8"
@@ -129,6 +131,10 @@ def main() -> int:                                # noqa: C901
 
     cog_port, api_port = free_port(), free_port()
     strict_port = free_port()
+    # ★ MLLP 用独立 TCP 端口（不是 HTTP 端口）：主后端「开 MLLP + 给令牌」跑全链路，
+    #   反例后端「开 MLLP + 不给令牌」验证 fail closed —— 一个进程同时覆盖两件事。
+    mllp_port = free_port()
+    mllp_strict_port = free_port()
     tmp = tempfile.mkdtemp(prefix="pasm-stack-")
     cog_log = os.path.join(tmp, "cognition.log")
     api_log = os.path.join(tmp, "backend.log")
@@ -163,7 +169,11 @@ def main() -> int:                                # noqa: C901
              "--spring.profiles.active=dev",
              "--server.port=%d" % api_port,
              "--pasm.cognition.base-url=http://127.0.0.1:%d" % cog_port,
-             "--pasm.cognition.token=" + API_TOKEN],
+             "--pasm.cognition.token=" + API_TOKEN,
+             # MLLP 直连通道（默认关闭，这里显式打开做端到端）
+             "--medical.lis.mllp.enabled=true",
+             "--medical.lis.mllp.port=%d" % mllp_port,
+             "--medical.lis.token=" + API_TOKEN],
             cwd=str(BACKEND), env=java_env,
             stdout=open(api_log, "w", encoding="utf-8"), stderr=subprocess.STDOUT)
         procs.append(("backend", api))
@@ -189,7 +199,10 @@ def main() -> int:                                # noqa: C901
              "--server.port=%d" % strict_port,
              "--medical.auth.demo-login-enabled=false",
              "--pasm.cognition.base-url=http://127.0.0.1:%d" % cog_port,
-             "--pasm.cognition.token=" + API_TOKEN],
+             "--pasm.cognition.token=" + API_TOKEN,
+             # ★ 故意开 MLLP 但**不配令牌**：验证未配置时 fail closed（回 AR 而非放行）
+             "--medical.lis.mllp.enabled=true",
+             "--medical.lis.mllp.port=%d" % mllp_strict_port],
             cwd=str(BACKEND), env=java_env,
             stdout=open(strict_log, "w", encoding="utf-8"), stderr=subprocess.STDOUT)
         procs.append(("backend-strict", strict))
@@ -789,7 +802,7 @@ def main() -> int:                                # noqa: C901
             import http.client, threading, time as _time
             from urllib.parse import urlparse
             u = urlparse(base)
-            sse = {"code": None, "events": []}
+            sse = {"code": None, "events": [], "ready": False, "ctype": ""}
 
             def sse_reader():
                 # ★ 不能用 resp.fp.readline()：那是**原始 chunked 流**，会读到
@@ -803,6 +816,7 @@ def main() -> int:                                # noqa: C901
                                           "Accept": "text/event-stream"})
                     resp = conn.getresponse()
                     sse["code"] = resp.status
+                    sse["ctype"] = resp.getheader("Content-Type", "")
                     buf = ""
                     deadline = _time.time() + 12
                     while _time.time() < deadline:
@@ -815,10 +829,13 @@ def main() -> int:                                # noqa: C901
                         buf += chunk.decode("utf-8", "replace")
                         while "\n\n" in buf:
                             block, buf = buf.split("\n\n", 1)
-                            data = "".join(
-                                ln[5:].strip() for ln in block.split("\n")
-                                if ln.startswith("data:")
-                            )
+                            lines = block.split("\n")
+                            ev = next((ln[6:].strip() for ln in lines
+                                       if ln.startswith("event:")), "message")
+                            data = "".join(ln[5:].strip() for ln in lines
+                                           if ln.startswith("data:"))
+                            if ev == "ready":
+                                sse["ready"] = True
                             if data:
                                 sse["events"].append(data)
                         if any("SSE 实时推送测试" in e for e in sse["events"]):
@@ -829,17 +846,24 @@ def main() -> int:                                # noqa: C901
 
             th = threading.Thread(target=sse_reader, daemon=True)
             th.start()
-            # 等连接真正建立（拿到 200）再发消息，避免"先发后订阅"造成偶发失败
+            # ★★ 反例判据（2026-11-05 审核测试抓到的真缺陷）：这里 last_id 就是最后一条
+            #   消息 id，即「补发循环为空」。修复前 SseEmitter 在首次 send 前不 flush，
+            #   服务端零字节 → getresponse() 阻塞到 socket 超时 → 下面三条全红。
+            #   必须在**发任何新消息之前**断言首帧，否则消息会顺带把响应头带出来，
+            #   缺陷就被掩盖成「偶发通过」（上一版 109 项就是这样假绿的）。
             for _ in range(60):
-                if sse["code"] is not None:
+                if sse["ready"] or not th.is_alive():
                     break
                 _time.sleep(0.1)
+            check("★ SSE 订阅即得首帧（零存量消息也能建立连接，不依赖新消息）",
+                  sse["ready"], "%s %s" % (sse["code"], str(sse["events"])[:120]))
             _time.sleep(0.3)
             st, d = req("POST", base + "/api/chat/%s/messages" % sid,
                         {"body": "医生：SSE 实时推送测试"}, token=dtoken)
             th.join(timeout=13)
             check("★ SSE 连接建立（text/event-stream，鉴权后）",
-                  sse["code"] == 200, "%s %s" % (sse["code"], str(sse["events"])[:120]))
+                  sse["code"] == 200 and "text/event-stream" in sse["ctype"],
+                  "%s %s" % (sse["code"], sse["ctype"]))
             check("★ SSE 实时推送：医生发消息后患者端立刻收到（不靠轮询）",
                   any("SSE 实时推送测试" in e for e in sse["events"]),
                   str(sse["events"])[:200])
@@ -858,6 +882,43 @@ def main() -> int:                                # noqa: C901
             check("★ 重复结束幂等（不重复落就诊）",
                   st == 200 and d.get("alreadyClosed") is True and d.get("encounterId") is None,
                   str(d)[:160])
+
+            # ---------- 10b) ★ 医师确认结论 → 可采纳候选（合规闸门正例）
+            #   上面 close 填了 assessment/plan，落库 source=PHYSICIAN_CONFIRMED。
+            #   days=1 窗口内只有这条真实坐诊就诊（演示就诊在 8/9 月，不在窗口）。
+            st, gen = req("POST", base + "/api/admin/kb/candidates/generate?days=1", {},
+                          token=token)
+            check("★ generate 报告区分可采纳 / 不可采纳（医师确认 ≥1）",
+                  st == 200 and gen.get("physicianConfirmed", 0) >= 1
+                  and "ineligible" in gen, str(gen)[:220])
+            st, cands = req("GET", base + "/api/admin/kb/candidates", token=token)
+            eligible = [c for c in cands if c.get("physicianConfirmed")] \
+                if isinstance(cands, list) else []
+            ineligible = [c for c in cands if not c.get("physicianConfirmed")] \
+                if isinstance(cands, list) else []
+            check("★ 医师确认候选带 physicianConfirmed=true", bool(eligible),
+                  str([(c.get("title"), c.get("physicianConfirmed")) for c in cands])[:200])
+            # ★ 不用 if ineligible / if eligible 包住：条件不成立时断言会「静默跳过」，
+            #   总数少两条但结果依然全绿 —— 这正是合规闸门最不能有的假绿。改成无条件。
+            check("★ 候选池同时存在可采纳与不可采纳两类（闸门判据有正反样本）",
+                  bool(eligible) and bool(ineligible),
+                  "eligible=%d ineligible=%d" % (len(eligible), len(ineligible)))
+            if ineligible:
+                st, blocked = req("POST", base + "/api/admin/kb/candidates/%s/approve"
+                                  % ineligible[0]["id"], {}, token=token)
+            else:
+                st, blocked = -1, {}
+            check("★ 反例：无医师结论的演示/预问诊候选采纳被 422 拒绝",
+                  st == 422 and blocked.get("code") == "NOT_PHYSICIAN_CONFIRMED",
+                  str(st) + " " + str(blocked)[:160])
+            if eligible:
+                st, approved = req("POST", base + "/api/admin/kb/candidates/%s/approve"
+                                   % eligible[0]["id"], {}, token=token)
+            else:
+                st, approved = -1, {}
+            check("★ 正例：医师确认候选可采纳并入库（知识池版本 +1）",
+                  st == 200 and approved.get("poolVersion", 0) >= 2,
+                  str(st) + " " + str(approved)[:160])
 
         st, d = req("GET", base + "/api/admin/patients", token=token)
         refs_all = [x.get("ref") for x in d] if isinstance(d, list) else []
@@ -878,6 +939,143 @@ def main() -> int:                                # noqa: C901
             check("★ 反例：demo-login-enabled=false 时写死的口令登不进去",
                   False, "反例后端未启动")
             check("关闭演示账号后未登录访问后台仍 401", False, "反例后端未启动")
+
+        # ---------- 12) ★ MLLP over TCP 直连 + HL7 ACK^R01（真开端口、真发帧）
+        #   放在最后：这一段会把 system_config.lis 切来切去，不影响前面的断言顺序。
+        def mllp_roundtrip(port, hl7, timeout=6, raw_frame=None, half_close=False):
+            """发一帧 MLLP，收一帧 ACK；返回 (是否成帧, MSA 码, 回显控制号, 原因, 全文)。"""
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+                s.settimeout(timeout)
+                s.sendall(raw_frame if raw_frame is not None
+                          else b"\x0b" + hl7.encode("utf-8") + b"\x1c\x0d")
+                if half_close:
+                    # 坏帧故意不闭合，半关写端让服务端立刻读到 EOF 并回 AE，
+                    # 否则服务端会一直等 0x0D 到读超时（10s）。
+                    s.shutdown(socket.SHUT_WR)
+                buf = b""
+                while not buf.endswith(b"\x1c\x0d"):
+                    part = s.recv(4096)
+                    if not part:
+                        break
+                    buf += part
+                s.close()
+            except Exception as e:                      # noqa: BLE001
+                return False, "", "", "ERR:" + repr(e)[:80], ""
+            framed = buf.startswith(b"\x0b") and buf.endswith(b"\x1c\x0d")
+            text = buf[1:-2].decode("utf-8", "replace") if framed else ""
+            msa = next((l for l in text.split("\r") if l.startswith("MSA|")), "")
+            f = msa.split("|")
+            return (framed,
+                    f[1] if len(f) > 1 else "",
+                    f[2] if len(f) > 2 else "",
+                    f[3] if len(f) > 3 else "", text)
+
+        def mllp_ready(port, timeout=12):
+            end = time.time() + timeout
+            while time.time() < end:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                        return True
+                except OSError:
+                    time.sleep(0.2)
+            return False
+
+        mllp_ok = mllp_ready(mllp_port)
+        check("★ MLLP 主通道端口可达（显式开启才监听）", mllp_ok, str(mllp_port))
+
+        # 机构对接模式必须切到 hl7，否则 ingest 明确拒绝（409/AR）。
+        st, d = req("POST", base + "/api/admin/config",
+                    {"ocr": "none", "lis": "hl7", "llm": "ollama",
+                     "model": "qwen2.5:7b", "baseUrl": "http://127.0.0.1:11434"}, token=token)
+        check("★ MLLP 前置：机构 LIS 模式切为 hl7", st == 200, str(st) + str(d)[:100])
+
+        oru = "\r".join([
+            "MSH|^~\\&|LIS|HOSP|EMR|HOSP|20261104120000+0800||ORU^R01|MSG-MLLP-E2E-1|P|2.5.1",
+            "PID|1||demo-patient-001^^^HOSP^MR",
+            "OBR|1|ORD-M1|SPEC-M1|CBC^血常规^L|||20261104115500",
+            "OBX|1|NM|WBC^白细胞计数^L||6.2|10*9/L|3.5-9.5|N|||F|||20261104115800",
+            "OBX|2|NM|HGB^血红蛋白^L||98|g/L|130-175|L|||F|||20261104115800",
+            "ZAT|" + API_TOKEN,
+        ])
+        framed, code, echo, reason, ack_text = mllp_roundtrip(mllp_port, oru)
+        check("★ MLLP 合法 ORU → ACK AA（成帧且回 ACK^R01）",
+              framed and code == "AA" and "ACK^R01" in ack_text,
+              "framed=%s code=%s ack=%s" % (framed, code, ack_text[:140]))
+        check("★ ACK 的 MSA-2 回显原 MSH-10（LIS 可对账，不会无限重发）",
+              echo == "MSG-MLLP-E2E-1", "echo=%s" % echo)
+        check("★ ACK 报告真实落库条数 inserted=2",
+              "inserted=2" in reason, "reason=%s" % reason)
+
+        # 真落库：从 FHIR 只读投影反查，而不是只看 ACK 自己说成功
+        st, obs = req("GET", base + "/api/fhir/Observation?patient=demo-patient-001",
+                      token=token, accept="application/fhir+json")
+        obs_text = str(obs)
+        check("★ MLLP 落库结果可从 FHIR Observation 读回（不是自报成功）",
+              st == 200 and "WBC" in obs_text and "HGB" in obs_text,
+              "st=%s has_wbc=%s" % (st, "WBC" in obs_text))
+        check("★ 反例：共享密钥 ZAT 未落进任何业务数据/响应",
+              API_TOKEN not in obs_text and API_TOKEN not in ack_text,
+              "token leaked")
+
+        # 幂等：同一消息重发，应 AA 但不再插入
+        framed2, code2, echo2, reason2, _ = mllp_roundtrip(mllp_port, oru)
+        check("★ MLLP 重发幂等：仍 AA，但 inserted=0 且跳过重复",
+              framed2 and code2 == "AA" and "inserted=0" in reason2
+              and "skippedDuplicates=2" in reason2,
+              "code=%s reason=%s" % (code2, reason2))
+
+        # 鉴权反例：缺 ZAT / 错令牌 → AR（配置问题，必须停止重试）
+        no_auth = oru.replace("\rZAT|" + API_TOKEN, "")
+        _, c3, _, r3, _ = mllp_roundtrip(mllp_port, no_auth)
+        check("★ 反例：MLLP 缺 ZAT 段 → AR missing_token（不是放行）",
+              c3 == "AR" and "missing_token" in r3, "code=%s reason=%s" % (c3, r3))
+        _, c4, _, r4, _ = mllp_roundtrip(
+            mllp_port, oru.replace("ZAT|" + API_TOKEN, "ZAT|wrong-token"))
+        check("★ 反例：MLLP 错令牌 → AR invalid_token",
+              c4 == "AR" and "invalid_token" in r4, "code=%s reason=%s" % (c4, r4))
+
+        # 业务反例：非 ORU / 未知患者 → AE（修正后可重发）
+        adt = oru.replace("ORU^R01", "ADT^A01")
+        _, c5, e5, r5, _ = mllp_roundtrip(mllp_port, adt)
+        check("★ 反例：MLLP 非 ORU 报文 → AE hl7_parse_error",
+              c5 == "AE" and "hl7_parse_error" in r5 and e5 == "MSG-MLLP-E2E-1",
+              "code=%s reason=%s echo=%s" % (c5, r5, e5))
+        _, c6, _, r6, _ = mllp_roundtrip(
+            mllp_port, oru.replace("demo-patient-001", "P-NOT-EXIST-MLLP")
+                          .replace("MSG-MLLP-E2E-1", "MSG-MLLP-E2E-2"))
+        check("★ 反例：MLLP 未知患者 → AE unknown_patient（不自动建档）",
+              c6 == "AE" and "unknown_patient" in r6, "code=%s reason=%s" % (c6, r6))
+
+        # 帧层反例：缺结束字节 → AE bad_end（帧都没读完，不能当 HL7 错误）
+        broken = b"\x0b" + oru.encode("utf-8") + b"\x1c"   # 缺 0x0D
+        framed7, c7, _, r7, _ = mllp_roundtrip(
+            mllp_port, "", raw_frame=broken, half_close=True)
+        check("★ 反例：MLLP 帧未闭合 → AE bad_end",
+              framed7 and c7 == "AE" and "bad_end" in r7,
+              "code=%s reason=%s" % (c7, r7))
+
+        # 配置闸门：lis=off → AR（与 HTTP 409 语义一致，停止重试联系管理员）
+        req("POST", base + "/api/admin/config",
+            {"ocr": "none", "lis": "off", "llm": "ollama",
+             "model": "qwen2.5:7b", "baseUrl": "http://127.0.0.1:11434"}, token=token)
+        _, c8, _, r8, _ = mllp_roundtrip(
+            mllp_port, oru.replace("MSG-MLLP-E2E-1", "MSG-MLLP-E2E-3"))
+        check("★ 反例：机构关闭 LIS 后 MLLP → AR lis_disabled（两条通道同判定）",
+              c8 == "AR" and "lis_disabled" in r8, "code=%s reason=%s" % (c8, r8))
+        req("POST", base + "/api/admin/config",
+            {"ocr": "none", "lis": "hl7", "llm": "ollama",
+             "model": "qwen2.5:7b", "baseUrl": "http://127.0.0.1:11434"}, token=token)
+
+        # fail closed：开了 MLLP 但**没配令牌**的后端，必须回 AR 而不是放行
+        strict_mllp_ok = mllp_ready(mllp_strict_port) if strict_ok else False
+        check("★ 未配令牌的 MLLP 通道仍监听（让 LIS 拿到明确拒绝而非黑盒）",
+              strict_mllp_ok, str(mllp_strict_port))
+        _, c9, _, r9, _ = mllp_roundtrip(
+            mllp_strict_port, oru.replace("MSG-MLLP-E2E-1", "MSG-MLLP-E2E-4"))
+        check("★ 反例：MEDICAL_LIS_TOKEN 未配置 → AR lis_token_not_configured（fail closed）",
+              c9 == "AR" and "lis_token_not_configured" in r9,
+              "code=%s reason=%s" % (c9, r9))
     finally:
         for name, p in procs:
             try:

@@ -1,15 +1,19 @@
 # LIS / HL7 / FHIR 对接
 
-本文只写**已实现**的部分，以及明确的边界。设计目标里的 TCP 监听、ACK 报文、
-LOINC 映射等尚未实现，见文末「尚未实现」。
+本文只写**已实现**的部分，以及明确的边界。2026-11-06 补上 **MLLP TCP 直连 +
+HL7 ACK^R01** 后，仍未实现的是 LOINC/SNOMED 映射、ORU 之外的报文等，见 §7。
 
-## 1. 三种能力
+## 1. 四种能力
 
 | 能力 | 端点 | 鉴权 | 说明 |
 |---|---|---|---|
-| HL7 v2 ORU 投递 | `POST /api/integration/lis/oru` | `X-LIS-Token` | 接收 `ORU^R01`，落 `lab_results` |
+| HL7 v2 ORU 投递（HTTP） | `POST /api/integration/lis/oru` | `X-LIS-Token` | 接收 `ORU^R01`，落 `lab_results` |
+| **HL7 v2 ORU 直连（MLLP/TCP）** | TCP `:2575`（默认关闭） | HL7 `ZAT` 段 + 共享密钥 | 同上 + 回 `ACK^R01`，见 §3.6 |
 | FHIR Observation 投递 | `POST /api/integration/fhir/observations` | `X-LIS-Token` | 接收 `Observation` 或 `Bundle(collection)` |
 | FHIR 只读投影 | `GET /api/fhir/**` | 用户 JWT | Patient / Encounter / Observation |
+
+> ★ HTTP 与 MLLP **共用** `LisIngestService.ingest()`：机构配置校验、未知患者拒收、
+> 幂等落库只有一份判定逻辑，不会出现「HTTP 拒了、TCP 却收了」的漂移。
 
 投递与读取的鉴权**刻意分离**：LIS 只该有"写检验结果"的权限。给它一个医护 JWT，
 等于让它能读全院病历。
@@ -81,6 +85,44 @@ printf 'MSH|^~\\&|LIS|HOSP|EMR|HOSP|20261104120000+0800||ORU^R01|MSG-001|P|2.5.1
 | 令牌缺失 / 错误 | 401 | `missing_token` / `invalid_token` |
 | 服务端未配置令牌 | 503 | `lis_token_not_configured` |
 
+## 3.6 MLLP 直连与 HL7 ACK^R01（2026-11-06 新增）
+
+当对接方要求 LIS **直连 2575 端口**、且强制要 HL7 ACK 报文时，打开 MLLP 通道：
+
+```bash
+MEDICAL_LIS_MLLP_ENABLED=true \
+MEDICAL_LIS_TOKEN=<共享密钥> \
+MEDICAL_LIS_MLLP_PORT=2575 \
+java -jar target/pasm-medical-backend-0.1.1.jar
+```
+
+**默认完全关闭**（不创建监听 Bean）。三个 fail-closed 约束：
+
+1. 只绑 `127.0.0.1`；跨机部署必须由院方在网络层做白名单/专网隔离，
+   本项目不代替院方做网络准入（投产门禁会把非回环绑定记为 BLOCK）。
+2. `MEDICAL_LIS_TOKEN` 未配置时通道仍监听，但**每条消息回 `AR` 拒绝**，
+   让 LIS 拿到明确结论而不是面对一个连不上/没响应的黑盒。
+3. 令牌与 HTTP 端点共用 `IntegrationTokenGuard` 的常量时间比较。
+
+**令牌怎么传**：TCP 没有 HTTP 头，用 HL7 自定义 `ZAT` 段（`ZAT|<token>`，HL7 v2
+允许的 Z 段扩展）。服务端提取后**在交给业务层之前剥掉该段**，保证共享密钥不落进
+解析结果、异常文本、日志或库表；消息控制号仍取 MSH-10，幂等键不受影响。
+
+**帧与 ACK**：入站 `0x0B <HL7> 0x1C 0x0D`，出站同格式封装 `ACK^R01`。
+MSA-2 回显原 MSH-10（LIS 靠它对账，丢了会无限重发）。MSA-1 三态：
+
+| 码 | 含义 | 触发 | LIS 该做什么 |
+|---|---|---|---|
+| `AA` | 接受 | 落库成功（含幂等重发） | 丢弃本地副本；MSA-3 带 `inserted=N;skippedDuplicates=M` |
+| `AE` | 应用错误 | 帧损坏、HL7 解析失败、未知患者 | **修正后**可重发；未知患者先核对主索引 |
+| `AR` | 拒绝 | 令牌缺失/错误/未配置、机构未启用 LIS | **停止重试**并联系管理员（重发不会变好） |
+
+这与 HTTP 的 `202 / 400 / 422 / 401 / 409` 是同一套判定，只是翻译成 HL7 标准写法。
+ACK 文本只放**稳定错误码**，不放异常原文（可能含患者 ref 或内部路径）。
+
+> ⚠ 一连接可连续发多帧，每帧立即回 ACK；空闲超时或 EOF 断开。
+> 单帧上限 1 MiB，与 HTTP 端点一致。
+
 ## 4. FHIR 投递
 
 ```bash
@@ -131,12 +173,12 @@ curl -sS -X POST 'http://127.0.0.1:8081/api/integration/fhir/observations' \
 
 | 项 | 现状 |
 |---|---|
-| MLLP **TCP 监听** | 未实现。当前是 HTTP 投递（由集成引擎/中间件转发），不是 LIS 直连 2575 端口 |
-| HL7 **ACK**（`ACK^R01`） | 未实现。用 HTTP 状态码表达接收结果；若对接方强制要求 ACK 报文，需补 |
-| ORU 之外的报文 | 未实现（ADT/ORM/RDE 一律 400） |
+| ORU 之外的报文 | 未实现（ADT/ORM/RDE 一律拒绝；MLLP 回 `AE`、HTTP 回 400） |
 | LOINC / SNOMED 映射 | 未实现。用院内码 + 文本，避免伪码 |
 | FHIR 写入非检验资源 | 未实现（只收 Observation） |
 | FHIR 搜索参数 | 只支持 `patient`；无 `date` / `code` / 分页 |
+| 跨机 MLLP 的网络准入 | 由院方网络层负责，代码只做绑定地址告警 |
+| 长期连接池 / TLS | 未实现。当前是明文 TCP + 回环绑定，跨机需院方加隧道 |
 
 ## 8. 验证
 
@@ -147,8 +189,14 @@ export JAVA_HOME="C:/Program Files/Java/jdk-18.0.1.1"
 # 纯解析单测（含反例）
 mvn -Dtest=Hl7ParserTest test
 
+# MLLP 帧 / ACK / ZAT 剥离的纯单测（不启 Spring、不开端口）
+mvn -Dtest=MllpProtocolTest test
+
 # 真 PostgreSQL 集成（落库/幂等/HTTP 鉴权/FHIR 投递）
 mvn -Dtest=LisIntegrationPostgresTest test
+
+# 端到端：真开两个 TCP 端口，发帧验 AA/AE/AR、幂等、fail closed
+python tools/e2e_stack.py     # 末段 15 项 MLLP 断言
 ```
 
-两套都用嵌入式 PostgreSQL，不依赖 Docker。
+真库测试用嵌入式 PostgreSQL，不依赖 Docker。`--full` 一键验证会全部串起来。

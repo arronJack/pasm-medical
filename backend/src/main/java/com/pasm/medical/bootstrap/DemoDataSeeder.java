@@ -52,6 +52,8 @@ public class DemoDataSeeder {
             e1.setPlan("转诊心内科，完善心电图与肌钙蛋白");
             e1.setTriageUrgency("emergency");
             e1.setSummaryText("主诉：胸痛 2 小时；判断：可疑心源性胸痛，已建议急诊；处置：转诊心内科，完善心电图与肌钙蛋白");
+            // ★ 演示数据把判断/处置手工填齐了 —— 绝不能因此被当成医师确认结论。
+            e1.setSource(Encounter.SRC_DEMO);
             encounters.save(e1);
 
             Encounter e2 = new Encounter();
@@ -63,6 +65,8 @@ public class DemoDataSeeder {
             e2.setPlan("对症处理，观察");
             e2.setTriageUrgency("routine");
             e2.setSummaryText("主诉：发热 3 天；判断：上呼吸道感染；处置：对症处理，观察");
+            // ★ 演示数据把判断/处置手工填齐了 —— 绝不能因此被当成医师确认结论。
+            e2.setSource(Encounter.SRC_DEMO);
             encounters.save(e2);
 
             // ★ 第二位演示患者是**刻意的**：他的就诊科室与前一位没有交集，
@@ -95,6 +99,8 @@ public class DemoDataSeeder {
             e3.setPlan("骨科门诊复诊，必要时影像检查");
             e3.setTriageUrgency("routine");
             e3.setSummaryText("主诉：右膝疼痛 1 周；判断：考虑退行性改变，建议进一步检查；处置：骨科门诊复诊");
+            // ★ 演示数据把判断/处置手工填齐了 —— 绝不能因此被当成医师确认结论。
+            e3.setSource(Encounter.SRC_DEMO);
             encounters.save(e3);
 
             // ★ 演示候选（审核台样例）：让"审核台"页一进来就有内容可看，

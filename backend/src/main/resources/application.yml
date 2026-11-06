@@ -71,6 +71,20 @@ medical:
   lis:
     token: ${MEDICAL_LIS_TOKEN:}
 
+    # ── MLLP over TCP（LIS 直连 2575 + HL7 ACK^R01）──────────────────
+    # ★ 默认关闭：现有部署走 HTTP 投递（由集成引擎转发）。只有对接方明确要求
+    #   LIS 直连、且强制要 ACK 报文时才打开。开监听端口是很重的决定。
+    # ★ 打开后仍 fail closed：仅绑回环、必须配 MEDICAL_LIS_TOKEN、
+    #   令牌用 HL7 自定义 ZAT 段承载（TCP 没有 HTTP 头），入库前剥离。
+    # ★ 跨机部署不要只改 bind：必须由院方在网络层做白名单/专网隔离，
+    #   本项目不代替院方做网络准入。
+    mllp:
+      enabled: ${MEDICAL_LIS_MLLP_ENABLED:false}
+      bind: ${MEDICAL_LIS_MLLP_BIND:127.0.0.1}
+      port: ${MEDICAL_LIS_MLLP_PORT:2575}
+      read-timeout-ms: ${MEDICAL_LIS_MLLP_READ_TIMEOUT_MS:10000}
+      max-connections: ${MEDICAL_LIS_MLLP_MAX_CONNECTIONS:8}
+
   # ── 自学习审核台（PLAN §8 候选池）──────────────────────────────────
   # 每日批处理默认**关闭**：自动跑会扫全库就诊写候选池，生产应在低峰期手动触发，
   # 或由运维在 supervisor/cron 里按机构节奏触发；避免"忘记配置就自动跑"带来的噪声。
@@ -84,6 +98,13 @@ medical:
   audit:
     enabled: true
     store: db
+
+  # ── 投产门禁启动自检（见 docs/COMPLIANCE-GATE.md）──────────────────
+  # 默认 false：只打印门禁报告（WARN），不阻止启动 —— 本仓 dev / 嵌入式 PG
+  # 测试 / e2e 共用同一份默认配置，若默认拦死会让一键验证集体起不来。
+  # ★ 投产必须置 true：任一 BLOCK 项未过 → 抛异常阻止启动。
+  production-gate:
+    strict: ${MEDICAL_PRODUCTION_GATE_STRICT:false}
 
 management:
   endpoints:

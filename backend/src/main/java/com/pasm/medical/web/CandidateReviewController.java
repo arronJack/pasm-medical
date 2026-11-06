@@ -85,6 +85,14 @@ public class CandidateReviewController {
         try {
             return ResponseEntity.ok(cand.approve(id, actor));
         } catch (IllegalStateException ex) {
+            // ★ 合规闸门单独用 422：与「已处理过」的 409 区分，前端能给出准确原因，
+            //   e2e 也能精确断言「不是别的原因导致的失败」。
+            if (ex.getMessage() != null
+                    && ex.getMessage().startsWith("candidate_not_physician_confirmed:")) {
+                return ResponseEntity.unprocessableEntity()
+                        .body(Map.of("error", ex.getMessage(),
+                                "code", "NOT_PHYSICIAN_CONFIRMED"));
+            }
             return conflict(ex.getMessage());
         }
     }

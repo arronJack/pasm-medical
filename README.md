@@ -156,10 +156,18 @@ python -m pasm_medical.domain            # 领域模型（隔离规则 / 去标�
 python -m pasm_medical.safety            # 护栏（红线）
 python -m pasm_medical.mcp.server --selftest   # MCP sidecar，23 项
 python tools/e2e_medical_service.py      # 真起 HTTP 服务，19 项
-python tools/e2e_stack.py                # 三端联调，109 项（四角色全覆盖 + 转人工全链路 + 7 项真实链路落库回归，需先 mvn package）
+python tools/e2e_stack.py                # 三端联调，131 项（四角色 + 坐诊 + SSE + MLLP/ACK，需先 mvn package）
+python tools/e2e_medical_mcp.py          # MCP stdio 真进程协议，15 项
+python tools/eval_real_learning.py       # 真实就诊链路自学习评测，74 项
+python tools/dist_smoke.py               # 分发形态冒烟，9 项（发 PyPI 前必跑）
 python tools/falsify_medical_service.py  # 反例对照：故意改坏必须被抓到
 python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约 + 真跑 --check
 ```
+
+> 上面每一条都能在本仓独立运行。**一键把 17 套串起来的编排器**
+> `run_checks.py`（`--full` = 前端构建 + 后端真库 + 分发冒烟 + MCP stdio + 真实评测）
+> 放在本项目的配套技能包里，不在仓库内 —— 它含本机 JDK / Python / Maven 的绝对路径，
+> 放进开源仓对其他人没有意义。用法见 [`docs/GUIDE.md`](docs/GUIDE.md) §二。
 
 ## 现状与后续
 
@@ -176,23 +184,28 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 | **角色与数据范围** | ✅ 四角色（患者 / 医护 / 科室管理员 / 超管）+ **身份 → 业务实体绑定**（`patientRef` / 科室 / 工号）；`/api/auth/me` 下发身份与可读范围，后台顶栏常驻显示「数据范围：本科室：发热门诊 / 全院」。✅ **P1-2：医护与科室管理员已拉开真实差异**（资料库引入**科室维度**，科室管理员只能管本科室资料 —— 新建强制本科室、跨科室/全院通用→403、列表仅本科室）；✅ **科室维度统计**：`/stats` 按本科室患者的 `patientRef` 集合过滤（超管 = 全院；医护/科室管理员 = 本科室；科室无患者时一律为 0，**不退化**成全院数字），响应带 `scope`/`scopeNote` |
 | **审计与统计** | ✅ 审计 append-only，**读 + 写双向事件且每条都带操作者**；患者问题原文随 `input_snapshot` 落库并可在后台查看；统计口径明确（口径定义随接口返回，避免"看着合理的假数字"），口径与埋点都有"改回旧实现即转红"的断言盯着 |
 | **资料库（回答依据）** | ✅ 后台可**新增 / 编辑 / 上下架 / 删除**；**P1-2 按科室授权**（`KnowledgeDoc.department`，空 = 全院通用）：科室管理员只能管本科室资料，医护仍 403，超管管全院；业务库是权威、认知侧只放"当前生效资料"的检索副本（全量同步）；**下架的资料不再作为任何回答的依据**。带依据问答走医疗侧的**相关性闸门**（命中词必须落在标题或标签上），没依据就拒答 —— 闸门与资料库都有正反断言盯着 |
-| 三端联调 | ✅ `tools/e2e_stack.py` **109 项全过**（四角色全覆盖：患者 / 医护 / 科室管理员 / 超管；含越权/非法输入/会话隔离反例 + 资料库科室授权反例 + 个体读维持现状锁定；**2026-11-05 新增 28 项**：科室主数据 CRUD、登录选科校验（缺省/不存在 → 400）、患者转人工幂等、坐诊队列科室隔离、跨科室接诊 403、接诊/双向消息/**SSE 实时推送**、AI 预问诊记录带入、在用科室禁删、结束落就诊与幂等；另含 **7 项真实链路落库回归**，专门防演示数据把「空壳就诊」判成绿） |
+| 三端联调 | ✅ `tools/e2e_stack.py` **131 项全过**（四角色全覆盖；含越权/非法输入/会话隔离反例 + 资料库科室授权反例 + 个体读维持现状锁定；**2026-11-05 新增 28 项**坐诊/科室/SSE 链路 + **2026-11-06 新增 16 项**（SSE 订阅首帧、医师确认结论采纳闸门正反例、**MLLP 直连 15 项**：真开两个 TCP 端口、ACK AA/AE/AR、MSA-2 回显、重发幂等、FHIR 反查落库、令牌不泄露、fail closed）；另含 **7 项真实链路落库回归**，专门防演示数据把「空壳就诊」判成绿） |
 | **人工坐诊（转人工）** | ✅ 2026-11-05 落地：`chat_sessions` / `chat_messages`（Flyway `V4`）+ `ChatController` + `AdminView` 坐诊台。患者可在问诊页选科室**一键转人工**，红旗中断时**自动转接**；转接时带**AI 预问诊记录**（医生不用重问）。会话进入科室队列（超管全院），医生**接诊 → 双向消息（SSE 实时推送 + 断线重连补发）→ 结束并落 `Encounter`**（可填医师判断/处置）；坐诊台常驻显示患者**过敏/慢病**。未接诊不能回复；跨科室接诊/访问一律 403；重复转人工与重复结束均幂等 |
 | **科室主数据** | ✅ 2026-11-05 落地：`departments`（Flyway `V4`）+ 超管「科室管理」标签（新增/停用/删除/排序）。登录页科室下拉**匿名只读**且只含启用科室；医护/科室管理员登录必须选科室（缺省或不存在 → 400）。**已有历史就诊/资料/会话的科室禁止删除**（提示改用停用，避免历史归类变孤儿）。**对接设置仅超管可见**（医护后台不再显示该标签） |
 | **受控学习 / 反馈作用面（P0.5）** | ✅ 医学动作后验落地（`pasm_medical/learning.py` 自包含 Beta-Bernoulli，绝不训练聊天动作池）：医生 `adopt/reject` 改接 `POST /api/feedback`，**只影响分诊候选排序、不碰安全规则**；否决后候选排序可观测变化、predict 概率 `<0.5`、非法 `decision` 返回 **400**；聊天动作池前缀被后验拒绝。验收 `tools/e2e_medical_learning.py`（14 项）+ `tools/falsify_medical_learning.py`（2 反例），已接入 `run_checks` ②b / ③b |
-| **自学习审核台（候选池 / 审核台 / 版本回滚）** | ✅ 2026-11-04 前移落地：`KbCandidateService` + `CandidateReviewController` + `V3__kb_candidates.sql`；每日批处理由 `MEDICAL_LEARNING_AUTO` 控制（默认关闭）。**2026-11-05 已开启开关做一轮真实就诊数据评测**（71 项全绿，见 [`docs/REAL-LEARNING-EVAL.md`](docs/REAL-LEARNING-EVAL.md)）：真链路落库字段对齐、复合科室归一化、无医师结论候选加合规护栏，指纹去重 / 冲突挂起 / 审核闸门 / 幂等全部通过；**生产仍保持关闭** —— 预问诊摘要按合规不含医师结论，当前候选是「患者自述 + 分诊建议」，不具备作为回答依据的资格，需先补「医师确认结论」链路（P3） |
-| **LIS / HL7 / FHIR 对接** | ✅ **已实现并验证**：`system_config.lis`（`off/hl7/fhir`）真正控制通道启停，不再为空壳；HL7 v2 `ORU^R01` 解析（MLLP 帧 / 自定义分隔符 / 转义 / 时区沿用 MSH-7）与 FHIR `Observation`/`Bundle` 投递均落 `lab_results`，`(message_control_id, observation_seq)` **幂等**；`/api/fhir/**` 提供 R4 只读投影（Patient / Encounter / Observation）。机器通道用**独立共享密钥** `MEDICAL_LIS_TOKEN`（未配置即关闭），与用户 JWT 分离；未实现的边界（TCP MLLP 监听 / HL7 ACK / LOINC 映射）见 [`docs/INTEGRATION-LIS-FHIR.md`](docs/INTEGRATION-LIS-FHIR.md) §7 |
-| **数据库迁移** | ✅ Flyway 版本化迁移（`V1__init.sql` / `V2__lab_results.sql`），`ddl-auto=validate`；dev(H2) 与生产共用同一份脚本，避免结构静默漂移。真 PostgreSQL 验证：嵌入式 PG 上的迁移测试 + 整应用启动测试 + LIS 集成测试 |
+| **自学习审核台（候选池 / 审核台 / 版本回滚）** | ✅ 2026-11-04 前移落地：`KbCandidateService` + `CandidateReviewController` + `V3__kb_candidates.sql`；每日批处理由 `MEDICAL_LEARNING_AUTO` 控制（默认关闭）。**2026-11-06 补齐 P0 合规根因**：Flyway `V5` 给就诊加**显式来源判据**（`AI_PRECONSULT` / `HUMAN_CONSULT_NO_CONCLUSION` / `PHYSICIAN_CONFIRMED` / `DEMO` / `LEGACY`），候选继承 `physicianConfirmed`，`approve()` 对无医师结论候选**硬拒 422**（原文字护栏可被一次点击绕过）；演示种子数据即使手工填齐判断/处置也标 `DEMO`，不能冒充。**合格数据源已具备**：坐诊台结束时由医师填写 `assessment/plan` 即落 `PHYSICIAN_CONFIRMED`。真实就诊评测 **74 项全绿**（见 [`docs/REAL-LEARNING-EVAL.md`](docs/REAL-LEARNING-EVAL.md)）；**生产仍保持关闭**，因为知识库内容仍需临床团队签核（见 [`docs/COMPLIANCE-GATE.md`](docs/COMPLIANCE-GATE.md)） |
+| **LIS / HL7 / FHIR 对接** | ✅ **已实现并验证**：`system_config.lis`（`off/hl7/fhir`）真正控制通道启停；HL7 v2 `ORU^R01` 解析（自定义分隔符 / 转义 / 时区沿用 MSH-7）与 FHIR `Observation`/`Bundle` 投递均落 `lab_results`，`(message_control_id, observation_seq)` **幂等**；`/api/fhir/**` 提供 R4 只读投影。**2026-11-06 补 MLLP over TCP 直连 + HL7 `ACK^R01`**（默认关闭、仅绑回环、`AA/AE/AR` 三态、MSA-2 回显控制号、令牌走 `ZAT` 段且入库前剥离、fail closed）；两条通道**共用 `LisIngestService.ingest()`**，不会判定漂移；e2e 真开两个 TCP 端口验 15 项。机器通道用**独立共享密钥** `MEDICAL_LIS_TOKEN`（未配置即关闭），与用户 JWT 分离；未实现边界（LOINC 映射、跨机网络准入、TLS）见 [`docs/INTEGRATION-LIS-FHIR.md`](docs/INTEGRATION-LIS-FHIR.md) §3.6 / §7 |
+| **数据库迁移** | ✅ Flyway 版本化迁移 `V1`~`V5`（初始化 / 检验结果 / 候选池 / 科室与人工会话 / **医师确认来源判据**），`ddl-auto=validate`；dev(H2) 与生产共用同一份脚本，避免结构静默漂移。真 PostgreSQL 验证：嵌入式 PG 上的迁移测试 + 整应用启动测试 + LIS 集成测试 + 候选闸门测试 |
+| **投产合规门禁** | ✅ 2026-11-06：`ProductionGate` 启动自检（默认 WARN 不拦，避免 dev/测试集体起不来；`MEDICAL_PRODUCTION_GATE_STRICT=true` 时任一 BLOCK 项**阻止启动**）+ [`docs/COMPLIANCE-GATE.md`](docs/COMPLIANCE-GATE.md) 人工签核清单。**代码能判的只有配置组合**；器械分类/NMPA/等保/伦理/临床复核属机构流程，代码不假装能判 |
 | 影像归档 | 未开始（P5，**只做归档与转交，不做分析**） |
 | 中医知识库 | 未开始（见 `docs/PLAN.md` §6） |
+| AI 问答流式输出 | 未开始（SSE 目前只覆盖**坐诊双向消息**；AI 问答仍一次性响应） |
+| 多主机会话共享 | 未开始（`SessionStore` 单机内存；扩容需接 Redis/DB） |
 
-**已验证的规模（2026-11-05 实测）**：`run_checks.py --web --java` **14 项套件全绿** —— 模块自检 **97 项**（14+16+24+23+11+9）+ 认知端到端 **19 项** + 学习端到端 **14 项** + 反例对照 **5 处 / 学习反例 2 处**（故意改坏必须被抓到）+ 三端联调 **109 项** + MCP selftest **23 项** + 前端 `vue-tsc` / `vite` 构建 0 错误 + 后端真 PostgreSQL 测试 **26 项**（迁移 1 + 整应用 1 + 候选审核台 5 + LIS 集成 9 + HL7 解析 10）。另有**独立验证资产**（未编进 `run_checks.py`）：MCP stdio e2e **15 项**、分发形态冒烟 **9 项**（发 PyPI 前必跑，本轮未跑）、**真实就诊数据自学习评测 71 项**（`tools/eval_real_learning.py`，报告见 [`docs/REAL-LEARNING-EVAL.md`](docs/REAL-LEARNING-EVAL.md)）。
+**验证体系（2026-11-06）**：`run_checks.py --full` 把 **17 套**一次性串起来 —— 模块自检 **97 项**（14+16+24+23+11+9）+ 认知端到端 **19 项** + 学习端到端 **14 项** + 反例对照 **5 处 / 学习反例 2 处**（故意改坏必须被抓到）+ 三端联调 **131 项** + MCP selftest **23 项** + 前端 `vue-tsc` / `vite` 构建 0 错误 + 后端真 PostgreSQL 测试（迁移 / 整应用 / 候选审核台 / LIS 集成 / HL7 解析 / **MLLP 协议 10 项** / **投产门禁 8 项**）+ **MCP stdio e2e 15 项** + **真实就诊数据自学习评测 74 项** + **分发形态冒烟 9 项**。后三套此前「有脚本但没编进一键验证」，现已纳入 `--full`，不再靠人记得手动跑。
 
 > **启动、部署、配置、排障**见 [`docs/GUIDE.md`](docs/GUIDE.md)；
 > **功能说明**（每个功能在做什么、边界在哪）也在同一份文档里。
 > **LIS/HL7/FHIR 对接**（启用步骤、字段映射、拒收规则、未实现边界）见
 > [`docs/INTEGRATION-LIS-FHIR.md`](docs/INTEGRATION-LIS-FHIR.md)；
-> **数据库迁移与上线清单**见 [`docs/DB-MIGRATION.md`](docs/DB-MIGRATION.md)。
+> **数据库迁移与上线清单**见 [`docs/DB-MIGRATION.md`](docs/DB-MIGRATION.md)；
+> **投产门禁（自动自检 + 人工签核清单）**见 [`docs/COMPLIANCE-GATE.md`](docs/COMPLIANCE-GATE.md)
+> —— 这份文档明确写出「目前不能进临床」以及原因。
 
 **完整的开发方案**（合规红线、数据模型、自学习闭环、验收标准、分期路线图）
 见 [`docs/PLAN.md`](docs/PLAN.md)。

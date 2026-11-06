@@ -287,6 +287,10 @@
                 <div v-if="c.status === 'CONFLICT'" class="cwarn">
                   ⚠ 与现库 {{ c.conflictWith }} 同标题但结论相反，已挂起待人工裁定（采纳即覆盖）
                 </div>
+                <div v-if="!c.physicianConfirmed" class="cwarn">
+                  ⚠ 预问诊采集／演示数据／历史记录，不含医师确认后的判断或处置 —— 不得作为机构回答依据，采纳已锁定
+                </div>
+                <div v-else class="cok">✓ 医师已确认结论（可作回答依据）</div>
               </td>
               <td>{{ c.department || '全院' }}</td>
               <td class="snap" :title="c.tags.join(' / ')">{{ c.tags.join(' / ') || '—' }}</td>
@@ -296,7 +300,9 @@
               <td class="mono">{{ c.createdAt }}</td>
               <td class="ops">
                 <template v-if="c.status === 'PENDING' || c.status === 'CONFLICT'">
-                  <button :disabled="!canWriteKb || candBusy" @click="approveCandidate(c.id)">采纳</button>
+                  <button :disabled="!canWriteKb || candBusy || !c.physicianConfirmed"
+                          :title="c.physicianConfirmed ? '采纳入库' : '缺医师确认结论，服务端会拒绝（422）'"
+                          @click="approveCandidate(c.id)">采纳</button>
                   <button :disabled="!canWriteKb || candBusy" @click="rejectCandidate(c.id)">驳回</button>
                 </template>
                 <span v-else class="muted">{{ c.reviewedBy || '—' }}</span>
@@ -1215,6 +1221,7 @@ td { padding: 8px; border-bottom: 1px solid var(--line); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .cwarn { margin-top: 4px; font-size: 11px; color: var(--danger-fg); }
+.cok { margin-top: 4px; font-size: 11px; color: var(--ok-fg, #2b8a3e); }
 .badge.pending { background: #eef2ff; color: #3b5bdb; }
 .muted { font-size: 12px; color: var(--text-3); }
 .pool {

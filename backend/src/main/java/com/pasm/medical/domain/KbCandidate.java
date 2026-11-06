@@ -73,6 +73,14 @@ public class KbCandidate {
     @Column(length = 64)
     private String fingerprint;
 
+    /**
+     * ★ 医师确认判据（Flyway V5）：候选是否源自「医师确认后的判断/处置」。
+     *   false = 预问诊采集 / 演示数据 / 历史行，**approve() 必须硬拒** ——
+     *   内容护栏只是给人看的文字，能被一次点击绕过；这里是结构性闸门。
+     */
+    @Column(nullable = false)
+    private boolean physicianConfirmed = false;
+
     /** 审核通过时打上的「知识池版本号」，回滚据此定位。 */
     @Column(length = 32)
     private String poolVersion;
@@ -124,6 +132,9 @@ public class KbCandidate {
 
     public String getPoolVersion() { return poolVersion; }
     public void setPoolVersion(String poolVersion) { this.poolVersion = poolVersion; }
+
+    public boolean isPhysicianConfirmed() { return physicianConfirmed; }
+    public void setPhysicianConfirmed(boolean v) { this.physicianConfirmed = v; }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

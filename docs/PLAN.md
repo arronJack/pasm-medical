@@ -7,14 +7,16 @@
 ## ⚠️ 阅读须知：本文是「设计目标 + 路线图」，不是当前已实现状态
 
 - 当前已落地的是 **MVP**（验证过、能跑），真实能力见 [README「现状与后续」](README.md#现状与后续)。
-- 设计稿中的 **pgvector / MinIO / Redis** 在 MVP 中**尚未落地** —— 属于目标，不是现状；**SSE 已部分落地（2026-11-05）**：坐诊双向消息走 `SseEmitter` + 前端 `fetch`/`ReadableStream`，但 **AI 问答本身仍是一次性响应、未做流式**（见下方对比表与 §3.6 / GUIDE）；**自学习闭环中的「审核台 + 候选池 + 版本回滚」已于 2026-11-04 前移落地**（**每日批处理默认关闭**；2026-11-05 已完成一轮真实就诊数据评测（71 项全绿，见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)）；生产仍保持关闭，原因见 §8.4），见下文与 [README「现状与后续」](../README.md#现状与后续)。
+- 设计稿中的 **pgvector / MinIO / Redis** 在 MVP 中**尚未落地** —— 属于目标，不是现状；**SSE 已部分落地（2026-11-05）**：坐诊双向消息走 `SseEmitter` + 前端 `fetch`/`ReadableStream`，但 **AI 问答本身仍是一次性响应、未做流式**（见下方对比表与 §3.6 / GUIDE）；**自学习闭环中的「审核台 + 候选池 + 版本回滚」已于 2026-11-04 前移落地**（**每日批处理默认关闭**；2026-11-06 已完成真实就诊数据评测（74 项全绿，见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)）；生产仍保持关闭，原因见 §8.4），见下文与 [README「现状与后续」](../README.md#现状与后续)。
   PostgreSQL **已落地**：生产表结构由 Flyway 版本化迁移管理（`db/migration/V1__init.sql`、`V2__lab_results.sql`），
   dev(H2) 与生产共用同一份脚本；见 [DB-MIGRATION.md](DB-MIGRATION.md)。
   **LIS/HL7/FHIR 对接已落地**（HL7 ORU / FHIR Observation 投递 + FHIR 只读投影，
-  见 [INTEGRATION-LIS-FHIR.md](INTEGRATION-LIS-FHIR.md)）；但 **MLLP TCP 监听、HL7 ACK 报文、
-  LOINC/SNOMED 映射** 仍未实现 —— 边界以该文档第 7 节为准。
+  见 [INTEGRATION-LIS-FHIR.md](INTEGRATION-LIS-FHIR.md)）；**2026-11-06 补 MLLP TCP 监听
+  + HL7 `ACK^R01`**（默认关闭、仅绑回环、令牌走 `ZAT` 段、AA/AE/AR 三态、与 HTTP 共用
+  `ingest()`）。仍未实现的是 **LOINC/SNOMED 映射、跨机网络准入、TLS** —— 边界以该文档
+  §3.6 / §7 为准。
   审核台（human-in-the-loop 自学习出口）+ 候选池 + 知识池版本回滚 **已于 2026-11-04 前移落地**（原属 P3）：
-  见 `KbCandidateService` / `CandidateReviewController` / `db/migration/V3__kb_candidates.sql`；每日批处理默认关闭（环境变量 `MEDICAL_LEARNING_AUTO` 开启）；**2026-11-05 真实数据评测结论见 `docs/REAL-LEARNING-EVAL.md`**（71 项全绿，同时修掉「真实问诊落库空壳」与「复合科室授权错配」两处真缺陷）。
+  见 `KbCandidateService` / `CandidateReviewController` / `db/migration/V3__kb_candidates.sql`；每日批处理默认关闭（环境变量 `MEDICAL_LEARNING_AUTO` 开启）；**2026-11-06 补 V5 医师确认来源判据 + `approve()` 硬拒闸门**，真实数据评测 **74 项全绿**，见 `docs/REAL-LEARNING-EVAL.md`（早期 71 项版本同时修掉「真实问诊落库空壳」与「复合科室授权错配」两处真缺陷）。
   认知服务的**跨请求会话**已抽出可插拔 `SessionStore`（默认 memory / CLI 默认 file），
   单机多 worker 与重启不再丢会话；**多主机**水平扩容仍需接 Redis/DB 实现（协议已就位）。
 - 下文凡标注「（目标）」的，均为 MVP 暂未落地的设计。
@@ -27,7 +29,7 @@
 | 数据标准 | FHIR | **FHIR R4 只读投影已落地**（Patient/Encounter/Observation）；写入只支持 Observation，无 LOINC 映射 |
 | 认知服务 | 无状态、可水平扩容 | 跨请求会话已抽出 `SessionStore`（file 存储：单机多 worker / 重启不丢）；多主机需接 Redis/DB |
 | 前端流式 | SSE | **AI 问答仍非流式（一次性响应）**；**坐诊双向消息已用 SSE 实时推送**（`SseEmitter` + `fetch`/`ReadableStream`，15s 心跳 + 断线重连 + `afterId` 补拉），6–10s 增量轮询仅作降级 |
-| 自学习闭环 | 每日批处理 + 候选池 + 审核台 | **审核台 + 候选池 + 版本回滚已前移落地（P3 内容，2026-11-04）**；**每日批处理默认关闭**；2026-11-05 已完成一轮真实就诊数据评测（71 项全绿，见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)）；生产仍保持关闭，原因见 §8.4 |
+| 自学习闭环 | 每日批处理 + 候选池 + 审核台 | **审核台 + 候选池 + 版本回滚已前移落地（P3 内容，2026-11-04）**；**每日批处理默认关闭**；2026-11-06 已完成真实就诊数据评测（74 项全绿，见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)）；生产仍保持关闭，原因见 §8.4 |
 | 工程结构 | 多模块（domain/service/cognition…） | 单模块 `backend/src/main/java/com/pasm/medical` + `web/` + `pasm_medical/` |
 
 ---
@@ -69,8 +71,8 @@
   机器通道用**独立共享密钥**（`MEDICAL_LIS_TOKEN`，未配置即关闭），与用户 JWT 分离。
   验证：HL7 解析单测 10 项 + 真 PostgreSQL 集成 9 项（含无令牌 401、坏消息 400 不落库、
   未知患者 422、重发幂等、跨患者同 id 冲突）。
-- **三端联调 `tools/e2e_stack.py` 全过**（109 项，含越权/非法输入反例 + 科室/坐诊/SSE 28 项；
-  P1-1/P1-2 共 12 项判据已做反向验证：故意改坏 → 恰好对应条数转红 → 还原后 109/109）。
+- **三端联调 `tools/e2e_stack.py` 全过**（131 项，含越权/非法输入反例 + 科室/坐诊/SSE 28 项 + 闸门/MLLP 16 项；
+  P1-1/P1-2 共 12 项判据已做反向验证：故意改坏 → 恰好对应条数转红 → 还原后 131/131）。
 - **P1-2 科室实体 + 本科室资源**：资料库引入**科室维度**（`KnowledgeDoc.department`，
   空 = 全院通用），科室管理员只**能管本科室**资料（新建强制本科室、跨科室/全院通用→403、
   列表仅本科室），与医护拉开首个真实能力差异。顺带修掉一个误导性缺陷：请求体畸形时
@@ -79,9 +81,11 @@
 > 结论（2026-11-05 更新）：**P0**（打通链路）、**P1**（医生助手 MVP）、
 > **P2**（记忆分层 / 患者隔离 / 采纳反馈闭环）均已落地并验证；情绪共情仍只作为认知层能力，
 > 未做业务层单独编排。原属 **P3** 的「候选池 + 审核台 + 版本回滚」已前移落地（2026-11-04），
-> 且 2026-11-05 完成一轮真实就诊数据评测（71 项全绿）；但因**预问诊候选中不含医师结论**，
-> 每日批处理生产仍保持关闭（见 §8.4）。**P4 / P5**（影像归档 / 中医知识库）与合规界定
-> 仍按路线图推进。
+> 且 2026-11-05 完成一轮真实就诊数据评测（71 项全绿；**2026-11-06 补 V5 医师确认闸门后为 74 项**）；
+> 医师确认结论的采集链路与采纳闸门**已落地**（坐诊台 `close` → `PHYSICIAN_CONFIRMED` → 可采纳），
+> 但每日批处理生产仍保持关闭：剩余瓶颈是**知识库内容需临床团队签核**，属机构流程
+> （见 [COMPLIANCE-GATE.md](COMPLIANCE-GATE.md) 与 §8.4）。**P4 / P5**（影像归档 / 中医知识库）
+> 与合规界定仍按路线图推进。
 
 > 前提假设（如与你的想法不符请指出，方案会随之调整）：
 > ① 定位为**医生辅助决策支持（CDSS）**，不是"AI 医生"；
@@ -355,7 +359,8 @@ GET  /api/cog/status       后端可用性 / 规模 / 版本
 
 用 `MEDICAL_LEARNING_AUTO=true` 起后端，5 例合成主诉全程走
 `/api/consult/start → answer → finish` 真实链路，`tools/eval_real_learning.py`
-跑出 **71 项核验全绿**（另有一个「不带环境变量」的对照后端硬证默认关闭），
+跑出 **71 项核验全绿（2026-11-06 补医师确认闸门的反向验证后为 74 项）**
+（另有一个「不带环境变量」的对照后端硬证默认关闭），
 完整报告见 [`docs/REAL-LEARNING-EVAL.md`](REAL-LEARNING-EVAL.md)。
 评测暴露并修掉两处**只有真实数据**才能发现的缺陷：
 
@@ -366,7 +371,7 @@ GET  /api/cog/status       后端可用性 / 规模 / 版本
    `DemoDataSeeder` 手工填齐字段，既有 74 项联调因此一直假绿。
    现按真实响应对齐字段名、补 `department`，`summaryText` 由 `summaryOf`
    构造去标识化结构化摘要（不编造结论、不存原始对话）；并在 `e2e_stack.py`
-   补 **7 项真实链路落库回归断言**（74 → **81 项**；2026-11-05 追加科室/坐诊/SSE 后为 **109 项**），以后再退化会被抓到。
+   补 **7 项真实链路落库回归断言**（74 → **81 项**；2026-11-05 追加科室/坐诊/SSE 后为 **109 项**；2026-11-06 追加闸门/MLLP 后为 **131 项**），以后再退化会被抓到。
 2. **复合科室授权错配**：`triage.suggested_department` 是 `发热门诊 / 感染科`，
    而 `Identity.department` 是 `发热门诊`；`KbCandidateService.list` 用精确
    `equals` 收窄 → 科室管理员对真实候选可见 **0 条**。现业务层落库取主科室
@@ -376,12 +381,16 @@ GET  /api/cog/status       后端可用性 / 规模 / 版本
 另如实标注一条**未改**：红旗中断时 `triage()` 只返回 `urgency/advice/reason`，
 不含 `suggested_department`，故该路径 `department` 为空、候选按设计仅超管可见。
 
-★ **仍未解决（不得假装修好）**：预问诊摘要按合规不含医师结论，本轮候选正文实际是
-「患者自述 + 分诊建议」，**不具备作为机构回答依据的资格**。已给这类候选加
-`【预问诊采集·非医师结论，不得作为诊疗依据】` 护栏（不放进 tags，避免给相关性闸门
-新增可命中词），但根治必须补「医师确认后的判断 / 处置」采集链路（P3）。
-在此之前 `MEDICAL_LEARNING_AUTO` 于生产必须保持关闭；审核台的人工闸门是最后一道
-防线（本轮已核验：候选绝不自动写 `knowledge_docs`，采纳才入库 + 版本 +1，驳回不入库）。
+★ **2026-11-06 根治（P0 合规根因）**：当时只靠文字护栏 `【预问诊采集·非医师结论】`
+挡着，但超管点一下「采纳」就能把患者自述写进 `knowledge_docs` —— **文字护栏可被一次
+点击绕过，比不设防更危险**。现已改为结构性闸门：Flyway `V5` 给 `encounters` 加显式
+`source`（`AI_PRECONSULT` / `HUMAN_CONSULT_NO_CONCLUSION` / `PHYSICIAN_CONFIRMED` /
+`DEMO` / `LEGACY`），候选继承 `physicianConfirmed`，`approve()` 对不合格候选**硬拒 422**
+（`NOT_PHYSICIAN_CONFIRMED`），审核台按钮同步置灰。演示种子数据即使手工填齐判断/处置
+也标 `DEMO`，不能冒充。合格数据源已具备：坐诊台结束会话时医师填写的 `assessment/plan`
+即落 `PHYSICIAN_CONFIRMED`。反例对照已验证：故意让闸门失效，422 断言精确转红。
+**生产仍保持 `MEDICAL_LEARNING_AUTO=false`** —— 剩下的不是代码缺口，而是知识库内容
+需要临床团队签核（见 [COMPLIANCE-GATE.md](COMPLIANCE-GATE.md)）。
 
 
 

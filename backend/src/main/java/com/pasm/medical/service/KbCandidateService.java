@@ -95,6 +95,7 @@ public class KbCandidateService {
         int generated = 0;
         int dedup = 0;
         int conflict = 0;
+        int physicianConfirmed = 0;
         java.util.List<Long> ids = new java.util.ArrayList<>();
 
         for (Encounter e : recent) {
@@ -166,10 +167,18 @@ public class KbCandidateService {
             c.setStatus(conflictWith == null ? KbCandidate.PENDING : KbCandidate.CONFLICT);
             c.setConfidence(confidence);
             c.setConflictWith(conflictWith);
-            c.setEvidence("source=encounter;ref=" + e.getPatientRef() + ";id=" + e.getId());
+            c.setEvidence("source=encounter;ref=" + e.getPatientRef() + ";id=" + e.getId()
+                    + ";encounterSource=" + e.getSource());
+            // ★★ 继承就诊的医师确认判据（V5）。判据来自**显式来源**，不是「字段非空」：
+            //   DemoDataSeeder 手工填齐了判断/处置，若只看字段，演示数据会被误判为
+            //   医师确认 —— 患者自述就这样混进机构回答依据。这里从根上区分。
+            c.setPhysicianConfirmed(e.isPhysicianConfirmed());
             c.setFingerprint(fingerprint);
             candidates.save(c);
 
+            if (c.isPhysicianConfirmed()) {
+                physicianConfirmed++;
+            }
             if (conflictWith != null) {
                 conflict++;
             }
@@ -187,6 +196,10 @@ public class KbCandidateService {
         report.put("conflict", conflict);
         report.put("pendingTotal", candidates.countByStatus(KbCandidate.PENDING)
                 + candidates.countByStatus(KbCandidate.CONFLICT));
+        // ★ 可采纳条数（医师确认）。generated 里其余的是「只能看、不能采纳」的采集记录：
+        //   让运维一眼看出「生成了一堆候选，但没有一条有资格入库」，别把数量当成进度。
+        report.put("physicianConfirmed", physicianConfirmed);
+        report.put("ineligible", generated - physicianConfirmed);
         report.put("ids", ids);
         // ★ 把"每日自动批处理是否开启"随报告回传：运维能当场确认开关真的接上了，
         //   而不是靠"我看我是设了环境变量"来猜。手动 /generate 本身不受这个开关限制。
@@ -256,6 +269,20 @@ public class KbCandidateService {
         if (!KbCandidate.PENDING.equals(c.getStatus())
                 && !KbCandidate.CONFLICT.equals(c.getStatus())) {
             throw new IllegalStateException("candidate_already_processed:" + c.getStatus());
+        }
+        // ★★ 结构性合规闸门（V5）：只有「医师确认后的判断/处置」有资格进知识库。
+        //   预问诊摘要按设计不含医师结论，正文是「患者自述 + 分诊建议」；
+        //   旧实现只加一句【非医师结论】文字护栏，超管点一下「采纳」就能绕过 ——
+        //   那是比不设防更危险的假校验。这里在**唯一生效入口**上硬拒，
+        //   与 MEDICAL_LEARNING_AUTO 开关无关（误开也只会生成候选，不会污染知识库）。
+        if (!c.isPhysicianConfirmed()) {
+            audit("candidate-approve-blocked", actor,
+                    "id=" + id + ";reason=not_physician_confirmed;encounterSource="
+                            + evidenceSourceOf(c));
+            throw new IllegalStateException(
+                    "candidate_not_physician_confirmed:该候选源自预问诊采集/演示数据/历史记录，"
+                            + "不含医师确认后的判断或处置，不得作为机构回答依据。"
+                            + "请先由接诊医师在坐诊结束时填写判断/处置，再生成候选。");
         }
 
         int newVersion = bumpPoolVersion();
@@ -361,11 +388,24 @@ public class KbCandidateService {
         m.put("source", c.getSource() == null ? "" : c.getSource());
         m.put("status", c.getStatus());
         m.put("confidence", c.getConfidence());
+        // ★ 前端据此禁用「采纳」并显示原因，别让审核者点一个必然 409 的按钮。
+        m.put("physicianConfirmed", c.isPhysicianConfirmed());
         m.put("conflictWith", c.getConflictWith() == null ? "" : c.getConflictWith());
         m.put("evidence", c.getEvidence() == null ? "" : c.getEvidence());
         m.put("poolVersion", c.getPoolVersion() == null ? "" : c.getPoolVersion());
         m.put("reviewedBy", c.getReviewedBy() == null ? "" : c.getReviewedBy());
         return m;
+    }
+
+    /** 从 evidence 里摘出 encounterSource 供审计说明（只用于日志，不参与判据）。 */
+    private static String evidenceSourceOf(KbCandidate c) {
+        String ev = c.getEvidence() == null ? "" : c.getEvidence();
+        for (String part : ev.split(";")) {
+            if (part.startsWith("encounterSource=")) {
+                return part.substring("encounterSource=".length());
+            }
+        }
+        return "LEGACY";
     }
 
     private void audit(String action, String actor, String detail) {

@@ -233,9 +233,51 @@
 **对接设置的权限**：只有超管 `staff` 能看到「对接设置」和「科室管理」两个标签，
 医护后台**不再显示**（避免非超管改到会让患者数据出网的配置）。
 
-> 手工核验（服务已起时）：`python tools/e2e_stack.py` 的 109 项里，
+> 手工核验（服务已起时）：`python tools/e2e_stack.py` 的 131 项里，
 > 有 28 项专门覆盖这条链路（科室 CRUD、登录选科、转人工幂等、队列隔离、接诊、双向消息、
 > SSE 实时推送、AI 预问诊记录带入、在用科室禁删、结束落就诊与幂等）。
+
+### 3.7 MLLP 直连与 HL7 ACK^R01 — 2026-11-06 落地（默认关闭）
+
+HTTP 投递（由院内集成引擎转发）仍是默认用法。**只有 LIS 厂商明确要求直连 2575 端口
+且强制要 ACK 报文时**才打开 TCP 通道：
+
+```bash
+MEDICAL_LIS_MLLP_ENABLED=true \
+MEDICAL_LIS_TOKEN="<共享密钥>" \
+MEDICAL_LIS_MLLP_PORT=2575 \
+java -jar backend/target/pasm-medical-backend-0.1.1.jar
+```
+
+报文形状（Python 片段，可直接拿去和 LIS 对调）：
+
+```python
+import socket
+oru = "\r".join([
+    "MSH|^~\\&|LIS|HOSP|EMR|HOSP|20261104120000+0800||ORU^R01|MSG-001|P|2.5.1",
+    "PID|1||demo-patient-001^^^HOSP^MR",
+    "OBR|1|ORD1|SPEC1|CBC^血常规^L|||20261104115500",
+    "OBX|1|NM|WBC^白细胞计数^L||6.2|10*9/L|3.5-9.5|N|||F",
+    "ZAT|<共享密钥>",          # ★ TCP 没有 HTTP 头，令牌走自定义 Z 段
+])
+s = socket.create_connection(("127.0.0.1", 2575), timeout=6)
+s.sendall(b"\x0b" + oru.encode() + b"\x1c\x0d")
+ack = s.recv(4096)             # 回一帧 MLLP 封装的 ACK^R01
+# MSA|AA|MSG-001|inserted=1;skippedDuplicates=0
+```
+
+| 要点 | 说明 |
+|---|---|
+| `ZAT` 段 | 服务端提取令牌后**先剥掉再交给业务层**，密钥不进解析结果/异常/日志/库表；与 HTTP 的 `X-LIS-Token` 共用 `IntegrationTokenGuard` |
+| `MSA|AA` | 已落库；`MSA-3` 带 `inserted` / `skippedDuplicates`，重发可据此确认幂等 |
+| `MSA|AE` | 帧损坏 / HL7 解析失败 / 未知患者 → **修正后可重发** |
+| `MSA|AR` | 令牌问题 / 机构未启用 LIS → **停止重试**联系管理员 |
+| 默认关闭 | 不设 `MEDICAL_LIS_MLLP_ENABLED` 时**不创建监听 Bean**，端口根本不打开 |
+| fail closed | 开了 MLLP 却没配令牌 → 端口仍监听但每条回 `AR lis_token_not_configured`，让 LIS 拿到明确结论而非黑盒 |
+| 只绑回环 | 默认 `127.0.0.1`；跨机必须由院方在网络层做白名单/专网隔离 |
+
+字段映射、拒收规则、未实现边界见 [`INTEGRATION-LIS-FHIR.md`](INTEGRATION-LIS-FHIR.md) §3.6 / §7。
+端到端 15 项断言（真开两个 TCP 端口）在 `tools/e2e_stack.py` 末段。
 
 ---
 
@@ -526,7 +568,7 @@ python tools/e2e_stack.py
 **业务层持久化**（患者档案 / 历史就诊 / 后台患者列表 / 统计 / 审计）→
 **就诊结构化详情 + 归属校验** → **对接设置读写 / 对账 / 白名单校验** → **角色越权 403**。
 
-**109 项全过**代表三端真的接上了（其中 28 项覆盖 §3.6 的科室 / 坐诊 / SSE 链路）。其中含**反例**（故意构造的越权/非法输入）：
+**131 项全过**代表三端真的接上了（28 项覆盖 §3.6 科室 / 坐诊 / SSE；16 项为 2026-11-06 新增：SSE 订阅首帧、医师确认结论采纳闸门正反例、MLLP 直连 15 项）。其中含**反例**（故意构造的越权/非法输入）：
 就诊归属不符必须 404（挡 IDOR）、非法枚举值必须 400、患者令牌访问后台必须 403、
 **患者换 `ref` 必须 403**、**别的患者回答同一会话必须查不到**、
 `demo-login-enabled=false` 时写死的账号必须登不进去、
@@ -615,7 +657,29 @@ tools\demo\stop-demo.bat --check       :: 只看端口状态，不杀进程
 | `PASM_MEDICAL_LLM` | `ollama` / `openai` / `null` |
 | `PASM_MEDICAL_LLM_BASE_URL` / `_MODEL` / `_API_KEY` | 对应后端参数 |
 | `MEDICAL_AUTH_DEMO_LOGIN` | 写死的演示账号开关，**默认 false**。只有 dev 档显式打开；生产接 OIDC/JWT 后才有人能登录 |
+| `MEDICAL_AUTH_JWT_SECRET` | 签名 JWT 密钥，≥32 字节随机值（`openssl rand -base64 48`）；空值会每次启动临时生成，旧令牌全失效 |
+| `MEDICAL_LIS_TOKEN` | 机器通道共享密钥，与用户 JWT 完全分离；**未配置即关闭通道**（fail closed） |
+| `MEDICAL_LIS_MLLP_ENABLED` / `_PORT` / `_BIND` | MLLP 直连，默认 `false` / `2575` / `127.0.0.1`；见 §3.7 |
+| `MEDICAL_LEARNING_AUTO` | 每日自学习批处理，默认 `false`；候选还须医师确认 + 人工采纳双闸 |
+| `MEDICAL_PRODUCTION_GATE_STRICT` | 投产门禁，默认 `false`（只 WARN）；置 `true` 时任一 BLOCK 项**阻止启动** |
 | `MEDICAL_DB_URL` / `_USER` / `_PASSWORD` | PostgreSQL（需要 JSONB + pgvector） |
+
+### 5.1b 投产前必跑：门禁自检 + 人工签核
+
+```bash
+# 1) 机器能判的：置 strict=true 启动，必须看到「投产门禁自检：无 BLOCK 项」
+MEDICAL_PRODUCTION_GATE_STRICT=true java -jar target/pasm-medical-backend-0.1.1.jar
+#    少配任一项（演示账号开着 / JWT 空 / H2 / MLLP 绑公网 / 自动学习开着）
+#    → IllegalStateException 直接阻止启动。
+
+# 2) 代码判不了的：逐项签核
+#    见 docs/COMPLIANCE-GATE.md（器械分类 / NMPA / 等保 / PIA / 临床复核 / 伦理…）
+```
+
+> ⚠ **「测试全绿」≠「可以进临床」**。自动化证明的是工程正确性；
+> 器械资质、临床内容复核、伦理审查属机构流程，代码不能判也不假装能判。
+> 默认 `strict=false` 是刻意的：本仓 dev / 嵌入式 PG 测试 / e2e 共用同一份默认配置，
+> 若默认拦死，一键验证会集体起不来 —— 那不是更安全，是把校验变成噪声。
 
 ### 5.2 三条部署红线
 
@@ -672,7 +736,7 @@ python -m pasm_medical.mcp.server --selftest
 # 认知服务端到端（真起 HTTP，19 项）
 python tools/e2e_medical_service.py
 
-# ★ 三端联调（认知服务 + Spring Boot + 前端契约，109 项；含越权/非法输入反例 + 7 项真实链路落库回归 + 28 项科室/坐诊/SSE 断言）
+# ★ 三端联调（认知服务 + Spring Boot + 前端契约，131 项；含越权/非法输入反例 + 7 项真实链路落库回归 + 28 项科室/坐诊/SSE + 16 项闸门/MLLP）
 #   前置：cd backend && mvn -DskipTests package
 python tools/e2e_stack.py
 
@@ -732,7 +796,7 @@ Python 进程里，由 `PASM_MEDICAL_LLM*` 环境变量决定。两者不一致�
 | 项 | 状态 |
 |---|---|
 | Python 认知服务（问诊树 / 检验单 / 护栏 / 隔离） | ✅ 已实现并验证（97 + 19 + 5 项） |
-| MCP stdio sidecar（`pasm_medical/mcp/`） | ✅ 已建并验证（selftest 23 项 + 三端 e2e 109 项）；复用 `MedicalService` 门面，不启 HTTP 零端口污染 |
+| MCP stdio sidecar（`pasm_medical/mcp/`） | ✅ 已建并验证（selftest 23 项 + 三端 e2e 131 项）；复用 `MedicalService` 门面，不启 HTTP 零端口污染 |
 | Spring Boot 业务层 | ✅ 已编译、已启动、三端联调全过；JPA 持久化（患者 / 就诊 / 审计 / **对接设置**）+ 真实管理接口（`/api/admin/*`、`/api/patient`、`/api/patient/encounters`、`/api/patient/encounter/{id}`、`/api/admin/config`、`/api/auth/me`）；**后台限医护侧（配置仅超管、资料库按科室授权）+ 按身份收窄数据范围** |
 | 前端 | ✅ 三栏工作台 + 医护后台，**全部接通真实后端**（登录 / 问诊 / 检验单 / 反馈 / 患者档案 / 历史就诊详情 / 后台患者·统计·审计·对接设置），构建通过、零 TS 错误 |
 | 影像 | ❌ 不做分析，只归档 + 转交 |

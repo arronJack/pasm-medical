@@ -51,6 +51,8 @@ export interface KbCandidate {
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CONFLICT'
   /** 抽取完整度启发式评分（0~1），辅助排序，非临床确定性。 */
   confidence: number
+  /** ★ 是否源自医师确认后的判断/处置；false 一律不得采纳（服务端 422 硬闸门）。 */
+  physicianConfirmed: boolean
   /** 冲突时指向现库资料键。 */
   conflictWith: string
   /** 生成依据（来源就诊 ref / 命中规则）。 */

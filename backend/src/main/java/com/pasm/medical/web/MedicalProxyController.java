@@ -234,6 +234,9 @@ public class MedicalProxyController {
                         e.setDepartment(primary.isEmpty() ? null : primary);
                     }
                 }
+                // ★ 预问诊按合规不含医师结论；即使上游将来给了 assessment/plan，
+                //   来源也标 AI_PRECONSULT，审核台不会把它当成医师确认的依据。
+                e.setSource(Encounter.SRC_AI_PRECONSULT);
                 e.setSummaryText(summaryOf(r, e));
                 encounters.save(e);
             } catch (Exception ex) {

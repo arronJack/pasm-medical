@@ -251,6 +251,13 @@ public class ChatService {
                     ? "人工咨询" : s.getChiefComplaint());
             e.setAssessment(blankToNull(assessment));
             e.setPlan(blankToNull(plan));
+            // ★★ 医师确认判据（Flyway V5）：只有「人工坐诊 + 接诊医师确实填了判断或处置」
+            //   才算合格来源。留空就标 NO_CONCLUSION，绝不因为「有就诊记录」而默认合格 ——
+            //   否则一个空壳会话会让患者自述变成机构回答依据。
+            boolean hasConclusion = (assessment != null && !assessment.isBlank())
+                    || (plan != null && !plan.isBlank());
+            e.setSource(hasConclusion ? Encounter.SRC_PHYSICIAN_CONFIRMED
+                    : Encounter.SRC_HUMAN_NO_CONCLUSION);
             e.setTriageUrgency(s.getUrgency() == null ? "routine" : s.getUrgency());
             e.setSummaryText(summaryOf(s, all, assessment, plan));
             saved = encounters.save(e);
