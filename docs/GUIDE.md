@@ -437,7 +437,7 @@ mvn -version          :: ★ 必须显示 Java version: 17.x
 ```bash
 # 安装依赖（基座 + 应用框架）
 # ★ pasm-framework 必须 >=0.5.3 —— 0.5.2 缺 register_route，装上会「启动即拒」
-pip install "pasm-skills>=0.6.2" "pasm-framework>=0.5.3"
+pip install "pasm-skills>=0.6.4" "pasm-framework>=0.5.3"
 pip install -e .
 ```
 
@@ -765,7 +765,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY pasm_medical ./pasm_medical
-RUN pip install --no-cache-dir "pasm-skills>=0.6.2" "pasm-framework>=0.5.3" -e .
+RUN pip install --no-cache-dir "pasm-skills>=0.6.4" "pasm-framework>=0.5.3" -e .
 ENV PASM_MEDICAL_LLM=null
 EXPOSE 8090
 CMD ["python", "-m", "pasm_medical.service", "--host", "0.0.0.0", "--port", "8090"]
@@ -818,7 +818,7 @@ cd web && npm run build
 ## 七、常见问题
 
 **Q：认知服务起来了，但 `/api/cog/*` 返回 503？**
-认知层没装上。`pip install -U "pasm-skills>=0.6.2"`。`/api/cog/capabilities` 会给出具体原因。
+认知层没装上。`pip install -U "pasm-skills>=0.6.4"`。`/api/cog/capabilities` 会给出具体原因。
 
 **Q：前端调接口一直 401？**
 业务层没带管理令牌。认知接口**全部落在管理作用域**（默认行为），
