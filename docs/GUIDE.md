@@ -820,6 +820,12 @@ cd web && npm run build
 **Q：认知服务起来了，但 `/api/cog/*` 返回 503？**
 认知层没装上。`pip install -U "pasm-skills>=0.6.4"`。`/api/cog/capabilities` 会给出具体原因。
 
+**Q：认知层装了，但患者的关键过敏史/禁忌没有被优先召回？**
+若环境里是 `pasm-skills` ≤0.6.5，`recall()` 的显著度恒为 1（关键事实护城河失效），
+需升级到 0.6.6：`pip install -U "pasm-skills>=0.6.6"`（0.6.6 还一并修复了遗忘曲线 ts、
+分类过滤 cat 的嵌套取值）。注意 `>=0.6.4` 对已装 0.6.4/0.6.5 的环境会被 pip 判为已满足
+而不升级，所以**必须显式写 0.6.6**。升级后 `/api/cog/capabilities` 与召回排序即恢复。
+
 **Q：前端调接口一直 401？**
 业务层没带管理令牌。认知接口**全部落在管理作用域**（默认行为），
 业务层需在 `PasmCognitionClient` 里配 `pasm.cognition.token`。
