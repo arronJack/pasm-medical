@@ -45,12 +45,72 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .domain import contains_identifiers, scrub_identifiers  # G2：出网去标识（L1 单点 + L4 硬闸）
+from .domain import (contains_identifiers, is_identifier_field,   # G2：出网去标识（L1 单点 + L4 硬闸）
+                      scrub_identifiers)
 
 __all__ = ["LLMConfig", "LLMProvider", "NullProvider", "OllamaProvider",
            "OpenAICompatProvider", "build_provider", "phrase_question",
            "compose_summary_text", "compose_answer", "compose_answer_text",
            "fallback_answer"]
+
+#: ★★ G2-L3 出网字段白名单（2026-11-20）。资料侧只允许这三个字段出网：
+#: ``title`` / ``brief`` / ``kind``。**其余字段一律不出网** —— 尤其是
+#: ``tags`` / ``salience`` / ``docKey`` / ``score`` / ``patient_ref`` 这些：
+#: 它们对"把资料说顺"这个任务**毫无用处**，属于白拿给第三方看的额外数据。
+#: 数据最小化不是"脱敏就够了"，是**根本不发**。
+EGRESS_ALLOWED_SOURCE_FIELDS = ("title", "brief", "kind")
+
+#: 单条资料的出网长度上限（字符）。资料原文可能很长，全量出网既费 token
+#: 又扩大暴露面；超长部分对"说顺"这个任务没有贡献。
+EGRESS_MAX_FIELD_CHARS = 600
+
+#: 出网资料条数上限。service.ask 的相关性闸门已经限了 keep 数量，
+#: 这里再兜一层 —— 万一闸门被绕过，也不至于把整个知识库送出去。
+EGRESS_MAX_SOURCES = 8
+
+
+def _egress_view(sources: Optional[List[Dict[str, Any]]] = None,
+                 ) -> List[Dict[str, Any]]:
+    """把资料列表投影成**可出网视图**（G2-L3）。
+
+    ★ 为什么必须做成一个函数、而不是在各处各写一遍
+    --------------------------------------------------
+    2026-11-20 的实测教训：出网 prompt 用的是**原始** title，而引用核验的
+    基准也用**原始** title，但基类 ``complete()`` 会在发送前把 prompt 脱敏。
+    于是模型看到的是「预问诊·[已去标识]」，核验时却拿它去比对「预问诊·138…」
+    → **即使模型引用完全正确也被判为"编造来源"** → 静默降级成原文摘录。
+    这个缺陷在日志里完全看不出来（没有异常、没有报错），只会让回答质量
+    莫名其妙变差。
+
+    ★ 修法不是"核验时也脱敏一下"，而是**让两边共用同一份视图**：
+    prompt 用什么，核验基准就用什么，回退文本也用同一份。
+    一份视图 → 三处一致 → 结构上不可能再分叉。
+
+    做三件事（顺序有意义）：
+      ① **白名单**：只保留 :data:`EGRESS_ALLOWED_SOURCE_FIELDS`；
+      ② **脱敏**：与基类 ``complete()`` 用同一个 :func:`scrub_identifiers`
+         （幂等，重复脱敏无害，但保证视图本身自洽）；
+      ③ **截断**：超长字段按上限裁剪，控制出网体量。
+    """
+    out: List[Dict[str, Any]] = []
+    for s in list(sources or [])[:EGRESS_MAX_SOURCES]:
+        if not isinstance(s, dict):
+            continue
+        view: Dict[str, Any] = {}
+        for key in EGRESS_ALLOWED_SOURCE_FIELDS:
+            if key not in s:
+                continue
+            raw = s.get(key)
+            if raw is None:
+                continue
+            text = scrub_identifiers(str(raw)).strip()
+            if len(text) > EGRESS_MAX_FIELD_CHARS:
+                text = text[:EGRESS_MAX_FIELD_CHARS]
+            if text:
+                view[key] = text
+        if view:
+            out.append(view)
+    return out
 
 #: 系统提示词里必须钉死的边界。**改这段之前先想清楚合规后果。**
 SYSTEM_GUARD = (
@@ -237,7 +297,13 @@ def phrase_question(provider: LLMProvider, question_text: str,
     """
     if not provider.available():
         return (fallback_prefix + question_text).strip()
-    known = "；".join("%s：%s" % (k, v) for k, v in list(facts.items())[:6]) or "无"
+    # ★ G2-L3：facts 的键来自问诊树（动态），**字段名本身**可能是标识字段
+    #   （如"姓名"、"住址"）—— 这种字段整条不出网，而不是只脱敏它的值。
+    #   脱敏只保证"值看不出真身"，字段白名单才保证"这类数据根本不发"。
+    safe_facts = [(k, v) for k, v in list(facts.items())[:6]
+                  if not is_identifier_field(str(k))]
+    known = "；".join("%s：%s" % (k, scrub_identifiers(str(v)))
+                      for k, v in safe_facts) or "无"
     prompt = ("患者已提供的信息：%s\n\n"
               "请把下面这个问题用更口语、更简短的问法问出来，"
               "只输出这一句问话，不要任何解释或额外内容：\n%s"
@@ -256,16 +322,20 @@ def phrase_question(provider: LLMProvider, question_text: str,
 def compose_summary_text(provider: LLMProvider,
                          summary: Dict[str, Any]) -> str:
     """把结构化摘要组织成通顺文字。**内容完全来自 summary**，模型只做措辞。"""
-    chief = summary.get("chief_complaint") or "未明确"
+    chief = scrub_identifiers(str(summary.get("chief_complaint") or "未明确"))
     pi = summary.get("present_illness") or {}
     lines = ["主诉：%s" % chief]
-    for k, v in pi.items():
-        lines.append("%s：%s" % (k, v))
+    # ★ G2-L3：同 phrase_question —— present_illness 的键是动态的，
+    #   标识类字段名整条不出网。
+    for k, v in (pi.items() if isinstance(pi, dict) else []):
+        if is_identifier_field(str(k)):
+            continue
+        lines.append("%s：%s" % (k, scrub_identifiers(str(v))))
     if summary.get("missing"):
-        lines.append("未采集到：" + "、".join(summary["missing"]))
+        lines.append("未采集到：" + "、".join(str(x) for x in summary["missing"]))
     rf = summary.get("red_flags") or []
     if rf:
-        lines.append("警示信号：" + "；".join(r["label"] for r in rf))
+        lines.append("警示信号：" + "；".join(str(r.get("label") or "") for r in rf))
     text = "\n".join(lines)
 
     if not provider.available():
@@ -363,13 +433,19 @@ def compose_answer(provider: LLMProvider, question: str,
     src = [s for s in (sources or []) if isinstance(s, dict)]
     if not src:
         return {"text": "", "source": "refused"}
-    fallback = fallback_answer(src)
+
+    # ★★ G2-L3：出网视图。prompt、核验基准、回退文本**三处共用这一份**。
+    #    绝不能各算各的 —— 基准与出网文本不一致时，模型引用完全正确也会被判编造。
+    view = _egress_view(src)
+    if not view:
+        return {"text": "", "source": "refused"}
+    fallback = fallback_answer(view)
 
     if not provider.available():
         return {"text": fallback, "source": "fallback"}
 
     blocks: List[str] = []
-    for i, s in enumerate(src, 1):
+    for i, s in enumerate(view, 1):
         title = str(s.get("title") or "").strip()
         brief = str(s.get("brief") or "").strip()
         kind = "机构资料" if s.get("kind") == "doc" else "患者既往记录"
@@ -379,7 +455,7 @@ def compose_answer(provider: LLMProvider, question: str,
     prompt = ("患者的问题：%s\n\n"
               "可用资料（**只有这些**）：\n%s\n\n"
               "请依据上述资料作答，并在最后一行列出你实际用到的资料标题。"
-              % (question, material))
+              % (scrub_identifiers(question), material))
     try:
         got = provider.complete(prompt, system=ANSWER_SYSTEM, max_tokens=500)
     except Exception:
@@ -394,7 +470,9 @@ def compose_answer(provider: LLMProvider, question: str,
     if not cited:
         return {"text": fallback, "source": "fallback"}   # 未标注依据 = 未锚定，不敢发出去
 
-    known = [_norm_cite(str(s.get("title") or "")) for s in src]
+    # ★ 基准取自**同一份视图**（view），不是原始 sources ——
+    #   模型看到的就是脱敏后的标题，基准必须与它一致，否则正确引用会被误判。
+    known = [_norm_cite(str(s.get("title") or "")) for s in view]
     known = [k for k in known if k]
     for c in cited:
         nc = _norm_cite(c)
@@ -532,21 +610,26 @@ def selftest() -> bool:
             return ""       # 返回空 → 各路径走 fallback，但我们只关心 prompt
 
     # 路径①：phrase_question 的 known（患者已提供信息）里藏手机号
+    #  ★ 断言口径：检验**安全属性**（原始标识绝不出网），不检验实现细节。
+    #    G2-L3 之后，"手机号"这种标识类字段是**整条剔除**的，所以 prompt 里
+    #    既没有原值、也不需要占位符 —— 只要标识出不去就算通过。
     cap1 = _CaptureProvider()
     phrase_question(cap1, "你哪里不舒服？", {"手机号": PHONE, "主诉": "胸痛"})
     check("★ G2 路径① phrase_question：出网 prompt 无原始手机号",
-          PHONE not in cap1.prompts[0] and "[已去标识]" in cap1.prompts[0],
-          cap1.prompts[0])
+          PHONE not in cap1.prompts[0], cap1.prompts[0])
+    check("★ G2 路径① 临床信息仍出网（脱敏不能把内容也抹掉）",
+          "胸痛" in cap1.prompts[0], cap1.prompts[0])
 
     # 路径②：compose_summary_text 的结构化病史里藏身份证
     cap2 = _CaptureProvider()
     compose_summary_text(cap2, {"chief_complaint": "胸痛",
-                                "present_illness": {"证件号": IDNO}})
+                                "present_illness": {"证件号": IDNO, "性质": "压榨样"}})
     check("★ G2 路径② compose_summary_text：出网 prompt 无原始身份证",
-          IDNO not in cap2.prompts[0] and "[已去标识]" in cap2.prompts[0],
-          cap2.prompts[0])
+          IDNO not in cap2.prompts[0], cap2.prompts[0])
+    check("★ G2 路径② 临床信息仍出网", "压榨样" in cap2.prompts[0], cap2.prompts[0])
 
     # 路径③：compose_answer 的患者问题里藏手机号（资料原文不含标识）
+    #   这条路径的"患者的问题"是自由文本、没有字段名可依 → 靠值级脱敏。
     cap3 = _CaptureProvider()
     g2_src = [{"title": "发热家庭处理", "brief": "体温≥38.5℃可按说明书退热。", "kind": "doc"}]
     compose_answer(cap3, "我的手机号是" + PHONE + "，这病怎么办", g2_src)
@@ -577,6 +660,81 @@ def selftest() -> bool:
 
     check("系统提示词钉死了三条禁止", "严禁" in SYSTEM_GUARD
           and "诊断" in SYSTEM_GUARD and "编造" in SYSTEM_GUARD)
+
+    # ---- ★★ G2-L2/L3（2026-11-20）。
+    #   L2：标签锚定脱敏；L3：出网字段白名单 + 长度上限。
+    #   另修一个 L1 落地时引入的隐缺陷：出网文本被脱敏、引用核验基准却是原文
+    #   → 模型引用完全正确也被判"编造来源"，静默降级成原文摘录（无异常、无日志）。
+
+    # L3：白名单外的字段绝不出网（tags/salience/docKey/score 对"说顺"毫无用处）
+    cap_l3 = _CaptureProvider()
+    leaky_src = [{"title": "发热家庭处理", "brief": "体温≥38.5℃可退热。", "kind": "doc",
+                  "tags": ["机密标签"], "salience": 5, "docKey": "secret-doc-key",
+                  "score": 0.99, "patient_ref": "patient-001"}]
+    compose_answer(cap_l3, "发烧怎么办", leaky_src)
+    _p3 = cap_l3.prompts[0]
+    check("★ L3 白名单外字段不出网（tags/salience/docKey/score/patient_ref）",
+          not any(x in _p3 for x in ("机密标签", "secret-doc-key", "patient-001")),
+          _p3[:120])
+    check("★ L3 白名单内字段正常出网",
+          "发热家庭处理" in _p3 and "体温≥38.5℃" in _p3, _p3[:120])
+
+    # L3：超长字段被截断（数据最小化 + 控制出网体量）
+    cap_len = _CaptureProvider()
+    compose_answer(cap_len, "发烧怎么办",
+                   [{"title": "长资料", "brief": "甲" * 2000, "kind": "doc"}])
+    _plen = cap_len.prompts[0]
+    check("★ L3 超长 brief 被截断", "甲" * (EGRESS_MAX_FIELD_CHARS + 1) not in _plen
+          and "甲" * EGRESS_MAX_FIELD_CHARS in _plen,
+          "len=%d" % len(_plen))
+
+    # L2：标签锚定型在出网路径上生效（字段名是标识字段 → 整条不出网）
+    cap_f = _CaptureProvider()
+    phrase_question(cap_f, "你哪里不舒服？", {"主诉": "胸痛", "姓名": "张三",
+                                             "住址": "南山区科技园1号"})
+    _pf = cap_f.prompts[0]
+    check("★ L2/L3 标识类字段整条不出网（姓名/住址字段）",
+          "张三" not in _pf and "南山区" not in _pf, _pf[:140])
+    check("★ L2/L3 临床字段照常出网（主诉）", "胸痛" in _pf, _pf[:140])
+
+    # ★★★ 回归：出网文本与核验基准必须同源（2026-11-20 实测缺陷）。
+    #   标题含标识时，模型引用的是**脱敏后**的标题；基准若用原文 → 正确引用被误判。
+    class _EchoCite(LLMProvider):
+        """像真模型一样，引用它在 prompt 里看到的标题。"""
+
+        name = "echo"
+
+        def __init__(self):
+            self.seen = ""
+
+        def available(self):
+            return True
+
+        def _send(self, prompt, *, system=SYSTEM_GUARD, max_tokens=400):
+            self.seen = prompt
+            _t = ""
+            for ln in prompt.splitlines():
+                if ln.startswith("[1]"):
+                    _t = ln.split("）", 1)[-1].strip()
+                    break
+            return "这是依据资料的回答。\n依据：" + _t
+
+    _echo = _EchoCite()
+    _out = compose_answer(_echo, "我胸闷怎么办",
+                           [{"title": "预问诊·" + PHONE, "brief": "患者自述胸闷 2 天。",
+                             "kind": "memory"}])
+    check("★★ 出网文本与引用核验基准同源（标题含标识时正确引用不被误判）",
+          _out["source"].startswith("llm:"), "source=%s" % _out["source"])
+    check("★★ 标题含标识时，回退文本也不含原始标识",
+          PHONE not in _out["text"], _out["text"][:80])
+
+    # 负对照：证明上面这条断言非恒绿 —— 把基准换回原文（模拟"没修"的状态），
+    #   必须复现"正确引用被判编造 → 静默降级"。若哪天有人把 view 拆开用，
+    #   这条会立刻红，说明防回归的判据还在。
+    _raw_known = [_norm_cite("预问诊·" + PHONE)]
+    _cited_norm = _norm_cite("预问诊·[已去标识]")
+    _mismatch = not any(k in _cited_norm or _cited_norm in k for k in _raw_known)
+    check("★★ 负对照：基准用原文时确实会误判（断言非恒绿）", _mismatch)
 
     # ---- ★ 依据资料作答（2026-11-06 新增）。这一组是"能不能把话说出去"的判据，
     #      每一条都对应一种真实失败：空回答 / 编造来源 / 超长跑偏 / 拒答路径误调模型。

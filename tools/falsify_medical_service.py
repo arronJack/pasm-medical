@@ -57,6 +57,15 @@ CASES = [
 ]
 
 
+def _normalize(text: str) -> str:
+    """行尾归一化（CRLF/CR → LF）。匹配锚点前用。
+
+    ★ 反例对照的判据不该因为"这个文件在本机是 CRLF 还是 LF"而失能 ——
+      失配 = 反例没被执行 = 假失败，且毫无异常提示。
+    """
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def run():
     env = dict(os.environ)
     extra = [str(REPO), str(REPO.parent / "pasm-skills"),
@@ -89,12 +98,21 @@ def main() -> int:
     try:
         for name, target, old, new in CASES:
             base = originals[target]
-            if old not in base:
+            # ★ 行尾不敏感匹配（2026-11-20 修）：本仓 service.py/domain.py 是
+            #   CRLF、consult.py/lab.py 是 LF（无 *.py 的 eol 契约，
+            #   core.autocrlf=true 让检出态随人漂移）—— 多行锚点写死 \n
+            #   会在 CRLF 文件上**静默失配**，反例根本没被执行却被记成
+            #   "没抓住"。失配没有任何异常提示，这种坑必须从根上堵。
+            base_n = _normalize(base)
+            old_n = _normalize(old)
+            if old_n not in base_n:
                 print("[跳过] 锚点没命中（代码改过？）: %s" % name)
                 bad += 1
                 continue
+            mutated = base_n.replace(old_n, _normalize(new), 1)
+            # 写回时沿用原文件的主导行尾，避免"改一次代码就把整个文件行尾改了"
             io.open(target, "w", encoding="utf-8", newline="").write(
-                base.replace(old, new, 1))
+                mutated.replace("\n", "\r\n") if "\r\n" in base else mutated)
             out2, rc2 = run()
             caught = (rc2 != 0) and (name in out2)
             print("%s %s  -> rc=%s 被抓=%s"

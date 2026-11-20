@@ -34,11 +34,60 @@ _SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 #: 于是「我的手机号是13812345678，…」里手机号前面是中文"是" → ``\b`` 不成立 →
 #: **中文句子里的手机号整段漏网**。改用「前后不是数字」的断言：既能在中文语境命中，
 #: 又不会把长数字串（如 18 位身份证）从中间截断误匹配。
-_SENSITIVE_PATTERNS = (
-    re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),          # 手机号（中文语境也能命中）
-    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),          # 身份证 18 位
-    re.compile(r"(?<!\d)\d{15}(?!\d)"),                # 身份证 15 位
+
+#: 脱敏占位符。**所有替换都产出它**，且它本身**不得命中任何一条规则** ——
+#: 否则 L4 硬闸（出网前再扫一遍）会把"已脱敏文本"误判成"残留标识"，
+#: 云端 provider 将**永久拒发**所有请求。这条约束由 domain 自检的幂等断言守住。
+REDACTION_PLACEHOLDER = "[已去标识]"
+
+#: 裸值型规则：(正则, 替换模板) —— 命中即**整段**替换成占位符。
+#:
+#: ★★ 顺序有意义：**从长到短**排。否则短规则可能先吃掉长串的前缀、留下尾巴：
+#:    15 位规则先跑会把 18 位身份证截成 "[已去标识]23X"，而残留的 "23X" 反而
+#:    脱敏不掉了（它已经不是 18 位，contains_identifiers 再扫也检不出）。
+#:    这种"部分残留"是脱敏里最隐蔽的失败方式 —— 表面看已脱敏，实际漏了。
+_BARE_RULES = (
+    (re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"), REDACTION_PLACEHOLDER),  # 身份证 18 位
+    (re.compile(r"(?<!\d)\d{15}(?!\d)"), REDACTION_PLACEHOLDER),        # 身份证 15 位
+    (re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"), REDACTION_PLACEHOLDER),  # 手机号
+    # 座机：有横杠形态明确，无横杠形态（075588888888）也可能撞上长编号 —— 宁可多脱
+    (re.compile(r"(?<![\d\-])0\d{2,3}-\d{7,8}(?![\d\-])"), REDACTION_PLACEHOLDER),
+    (re.compile(r"(?<!\d)0\d{9,11}(?!\d)"), REDACTION_PLACEHOLDER),
+    (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"),
+     REDACTION_PLACEHOLDER),                                           # 邮箱
 )
+
+#: 标签锚定型：**只替换「标签：值」里的值，标签保留**。
+#: 理由：模型仍能看出"这里本来有个姓名字段"，但拿不到具体值 —— 比整段消失更有用。
+#:
+#: 为什么用「标签锚定」而不是直接匹配裸中文姓名：中文姓名与普通词汇无法用正则区分
+#: （"李医生"/"当归"都可能是词），裸匹配必然误伤临床内容。带标签的形态才是
+#: 表单里真正会出现的、且能判定为标识的形态。
+_LABEL_TAGS = (
+    "紧急联系人姓名|监护人姓名|联系人姓名|紧急联系人|患者姓名|病人姓名|姓名|"
+    "身份证件号码|身份证号|证件号码|证件号|身份证|"
+    "病历编号|病历号|就诊卡号|门诊号|住院号|就诊号|挂号号|医保号|社保卡号|"
+    "家庭住址|通讯地址|现住址|住址|地址|"
+    "联系电话|联系方式|手机号码|手机号|电话|"
+    "出生日期|出生年月|生日"
+)
+
+#: 标签后面的值：到分隔符/换行为止，**排除方括号** ——
+#: 占位符以 "[" 开头，天然不会被自己二次匹配（这是幂等的关键）。
+_LABEL_VALUE = r"[^\n，,。；;、 \[\]]{1,200}"
+
+#: (正则, 替换模板)。``\1\2`` 保留「标签 + 分隔符」，只把值抹成占位符。
+_LABELLED_RULES = (
+    (re.compile(r"(%s)(\s*[：:]\s*)(%s)" % (_LABEL_TAGS, _LABEL_VALUE)),
+     r"\1\2" + REDACTION_PLACEHOLDER),
+)
+
+#: 全部敏感规则（供 contains_identifiers 逐条扫描）。**单一来源**，
+#: 不要在别处再抄一份 —— 两处各写一遍、改一处就会静默放行（本项目踩过同类问题）。
+_SENSITIVE_PATTERNS = tuple(pat for pat, _ in _LABELLED_RULES + _BARE_RULES)
+
+#: 只匹配标签名（不要求冒号与值）—— 用于判断"这个**字段名**本身是不是标识字段"。
+_FIELD_LABEL_RE = re.compile(r"(%s)" % _LABEL_TAGS)
 
 
 def agent_id_for(tenant: str, patient_ref: str) -> str:
@@ -68,28 +117,53 @@ def pseudonymize(raw_id: str, *, salt: str = "pasm-medical") -> str:
 
 
 def scrub_identifiers(text: str) -> str:
-    """粗粒度去标识：把手机号 / 身份证替换成占位符。
+    """粗粒度去标识：把手机号 / 身份证 / 姓名 / 地址等替换成占位符。
 
     这是**兜底**，不是合规方案 —— 真正的去标识化在数据出业务库之前就该做完
     （见 PLAN.md §1.3）。放这一层是为了"就算上游漏了，认知层也不留痕"。
+
+    ★★ 两类规则，替换方式不同（2026-11-20 G2-L2 扩展）：
+
+    1. **裸值型**（手机号 / 身份证 / 座机 / 邮箱）→ 整段替换成 ``[已去标识]``。
+       规则按**长到短**排列，否则短规则会先吃掉长串的前缀、留下尾巴
+       （15 位规则先跑会把 18 位身份证截成 ``[已去标识]23X``，尾巴反而漏了）。
+    2. **标签锚定型**（姓名：/ 住址：/ 病历号：…）→ **只替换值、保留标签**，
+       这样模型仍看得出"这里本来有个姓名字段"，只是拿不到值。
+
+    ★★ 幂等性是硬约束：``scrub(scrub(x)) == scrub(x)``，且脱敏后的文本
+    **不得再命中任何规则**。否则出网侧的 L4 硬闸会把"已脱敏文本"误判成
+    "残留标识"，云端 provider 将永久拒发所有请求。
+    占位符以 "[" 开头且标签型的值部分排除方括号 —— 这是幂等的实现基础。
     """
     out = text or ""
-    for pat in _SENSITIVE_PATTERNS:
-        out = pat.sub("[已去标识]", out)
+    for pat, repl in _LABELLED_RULES:
+        out = pat.sub(repl, out)
+    for pat, repl in _BARE_RULES:
+        out = pat.sub(repl, out)
     return out
 
 
 def contains_identifiers(text: str) -> bool:
-    """文本里**是否仍含**直接标识（手机号 / 身份证 / 15 位数字）。
+    """文本里**是否仍含**直接标识（手机号 / 身份证 / 座机 / 邮箱 / 标识字段值）。
 
-    与 :func:`scrub_identifiers` 共用 :data:`_SENSITIVE_PATTERNS`，用于出网侧的
+    与 :func:`scrub_identifiers` 共用同一组规则（单一来源），用于出网侧的
     L4 硬闸：脱敏之后再扫一遍，若仍命中说明脱敏这一步被绕过或改坏，fail closed 拒发。
 
-    ⚠️ 诚实边界：它只能发现 :data:`_SENSITIVE_PATTERNS` 覆盖得到的形态。
-    姓名、地址、病历号等（L2）**不在**这个函数的视野内 —— 别把它当完整 PII 检测。
+    ⚠️ 诚实边界：它只能发现规则覆盖得到的形态。**中文姓名若不带标签
+    （如"张三说头痛"）依然检不出** —— 中文姓名与普通词汇无法用正则区分，
+    裸匹配必然误伤临床内容。要真正覆盖需要专业 NER 或"数据入库前结构化"。
     """
     out = text or ""
     return any(pat.search(out) for pat in _SENSITIVE_PATTERNS)
+
+
+def is_identifier_field(name: str) -> bool:
+    """这个**字段名**本身是不是标识字段（姓名 / 电话 / 地址 / 病历号…）。
+
+    给 L3 出网字段白名单用：即使某字段的值不含可识别标识（如"姓名"值为空），
+    只要字段名是标识字段，就**不整条出网** —— 数据最小化优先于"看起来没泄漏"。
+    """
+    return bool(_FIELD_LABEL_RE.search(name or ""))
 
 
 @dataclass
@@ -236,6 +310,53 @@ def selftest() -> bool:
           not contains_identifiers(scrub_identifiers("手机 13812345678")))
     check("contains_identifiers 对普通病史不误报",
           not contains_identifiers("主诉胸痛，血压152/94，无药物过敏"))
+
+    # ---- ★★ G2-L2 扩展识别模式（2026-11-20）。标签锚定型：只换值、保留标签。
+    lab = scrub_identifiers("姓名：张三，男，45岁")
+    check("★ L2 姓名标签：值被去标识", "张三" not in lab, lab)
+    check("★ L2 姓名标签：标签保留（模型仍看得出字段存在）",
+          "姓名：" in lab, lab)
+    addr = scrub_identifiers("住址：广东省深圳市南山区科技园路1号")
+    check("★ L2 地址标签：值被去标识", "南山区" not in addr, addr)
+    mrn = scrub_identifiers("病历号：MR20240315001")
+    check("★ L2 病历号标签：值被去标识", "MR20240315001" not in mrn, mrn)
+    tel = scrub_identifiers("联系电话：0755-88888888")
+    check("★ L2 座机（带横杠）被去标识", "0755-88888888" not in tel, tel)
+    mail = scrub_identifiers("邮箱 zhangsan@example.com")
+    check("★ L2 邮箱被去标识", "zhangsan@example.com" not in mail, mail)
+    # 负例：临床内容不得被误伤（这是脱敏能不能上线的底线）
+    for safe in ("主诉：胸痛，血压152/94，无药物过敏",
+                 "既往史：青霉素过敏，2019年行阑尾切除术",
+                 "现病史：患者自述胸闷2天，无放射痛"):
+        check("★ L2 临床文本零误伤：%s" % safe[:14],
+              scrub_identifiers(safe) == safe, scrub_identifiers(safe))
+
+    # ---- ★★ 幂等性是硬约束：scrub(scrub(x)) == scrub(x)，且脱敏后不再命中任何规则。
+    #      若不成立 → L4 硬闸会把"已脱敏文本"误判成残留标识 → 云端 provider 永久拒发。
+    _idem_cases = [
+        "患者张三，手机 13812345678，身份证 11010119900307123X",
+        "我的手机号是13812345678，证件11010119900307123X，请看病",
+        "姓名：张三，男，45岁",
+        "住址：广东省深圳市南山区科技园路1号",
+        "病历号：MR20240315001，联系电话：0755-88888888",
+        "出生日期：1980-05-12，邮箱 zhangsan@example.com",
+        "紧急联系人：李四，电话13812345678",
+        "主诉：胸痛，血压152/94，无药物过敏",
+    ]
+    _idem_bad = [c for c in _idem_cases
+                 if scrub_identifiers(scrub_identifiers(c)) != scrub_identifiers(c)]
+    check("★★ 脱敏幂等（scrub∘scrub == scrub，全部用例）",
+          not _idem_bad, str(_idem_bad[:1]))
+    _res_bad = [c for c in _idem_cases
+                if contains_identifiers(scrub_identifiers(c))]
+    check("★★ 脱敏后不再命中任何规则（L4 硬闸不会误拒发）",
+          not _res_bad, str(_res_bad[:1]))
+
+    # ---- G2-L3：字段名白名单判定（即使值为空，标识类字段也不该出网）
+    check("★ L3 标识字段名被识别（姓名/电话/住址/病历号）",
+          all(is_identifier_field(x) for x in ("姓名", "联系电话", "住址", "病历号")))
+    check("★ L3 临床字段名不被误判（主诉/过敏史/用药史）",
+          not any(is_identifier_field(x) for x in ("主诉", "过敏史", "用药史", "既往史")))
 
     # Encounter → 记忆
     enc = Encounter(encounter_id="e1", patient_ref="p1", department="心内科",

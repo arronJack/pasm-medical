@@ -28,6 +28,18 @@ REPO = HERE.parent
 SERVICE = REPO / "pasm_medical" / "service.py"
 
 #: (要验的断言名, 目标文件, 原文锚点, 改坏后的文本)
+#:
+#: ★★ 锚点匹配必须**行尾不敏感**（2026-11-20 修）：本仓 ``service.py``/
+#:    ``domain.py``/``llm.py`` 是 CRLF、其余是 LF（无 ``*.py`` 的 eol 契约，
+#:    ``core.autocrlf=true`` 让检出态随人漂移）—— 多行锚点写死 ``\n``
+#:    就会在这些文件上**静默失配**，反例根本没被执行，却被记成"没抓住"。
+#:    这种失败没有任何异常，只有"结论：1 处没抓住"。
+#:
+#:    所以本文件统一用 :func:`_normalize` 归一化后再匹配 —— 既保留多行锚点
+#:    的精确性（单行锚点会把"只改一行"变成"改坏语法"，反例就失效了：
+#:    语法错误也能让 e2e 变红，那是**假抓住**），又能跨行尾风格工作。
+#:    同目录 ``falsify_medical_service.py`` 早有同款教训（多行锚点转义写错 →
+#:    静默不命中），此处一并治本。
 CASES = [
     # ★ 让候选排序忽略后验：否决后顺序不变 → "排序变化"断言必须转红
     ("★ 否决规则建议科室后，分诊候选排序发生变化", SERVICE,
@@ -39,6 +51,15 @@ CASES = [
      '        success = (decision == "adopt")',
      '        success = True  # 反例：否决也当采纳 → 后验永不降权'),
 ]
+
+
+def _normalize(text: str) -> str:
+    """行尾归一化（CRLF/CR → LF）。匹配锚点前用。
+
+    ★ 这样即使有人又写了多行锚点，也不会因为本机/仓库里行尾风格不同而失配。
+      失配 = 反例没被执行 = 假失败，且毫无异常提示 —— 这种坑必须从根上堵。
+    """
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def run():
@@ -69,12 +90,18 @@ def main() -> int:
     try:
         for name, target, old, new in CASES:
             base = originals[target]
-            if old not in base:
+            # ★ 行尾不敏感匹配：锚点与原文都归一化后再比。
+            #   命中则把**原文那一段**换掉（用归一化后的原文写回，再还原原始行尾风格）。
+            base_n = _normalize(base)
+            old_n = _normalize(old)
+            if old_n not in base_n:
                 print("[跳过] 锚点没命中（代码改过？）: %s" % name)
                 bad += 1
                 continue
+            mutated = base_n.replace(old_n, _normalize(new), 1)
+            # 写回时沿用原文件的主导行尾，避免"改一次代码就把整个文件的行尾改了"
             io.open(target, "w", encoding="utf-8", newline="").write(
-                base.replace(old, new, 1))
+                mutated.replace("\n", "\r\n") if "\r\n" in base else mutated)
             out2, rc2 = run()
             caught = (rc2 != 0) and (name in out2)
             print("%s %s  -> rc=%s 被抓=%s"
