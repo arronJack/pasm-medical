@@ -207,6 +207,10 @@ python tools/check_demo_launchers.py     # 启动器脚本的编码/行尾契约
 > **数据库迁移与上线清单**见 [`docs/DB-MIGRATION.md`](docs/DB-MIGRATION.md)；
 > **投产门禁（自动自检 + 人工签核清单）**见 [`docs/COMPLIANCE-GATE.md`](docs/COMPLIANCE-GATE.md)
 > —— 这份文档明确写出「目前不能进临床」以及原因。
+> **数据安全协议**（数据分类/已落地机制/6 个缺口，G2 出网去标识已修复）见 [`docs/DATA-SECURITY-POLICY.md`](docs/DATA-SECURITY-POLICY.md)；
+> **能力边界声明**（10 项能做 / 8 项禁止用途，防误用）见 [`docs/CAPABILITY-BOUNDARY.md`](docs/CAPABILITY-BOUNDARY.md)；
+> **TLS 与去标识化出网改造评估**（G2 出网去标识已落地 / G1 TLS 待部署）见
+> [`docs/TLS-AND-DEIDENTIFICATION-ASSESSMENT.md`](docs/TLS-AND-DEIDENTIFICATION-ASSESSMENT.md)。
 
 **完整的开发方案**（合规红线、数据模型、自学习闭环、验收标准、分期路线图）
 见 [`docs/PLAN.md`](docs/PLAN.md)。

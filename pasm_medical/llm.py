@@ -45,6 +45,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from .domain import contains_identifiers, scrub_identifiers  # G2：出网去标识（L1 单点 + L4 硬闸）
+
 __all__ = ["LLMConfig", "LLMProvider", "NullProvider", "OllamaProvider",
            "OpenAICompatProvider", "build_provider", "phrase_question",
            "compose_summary_text", "compose_answer", "compose_answer_text",
@@ -91,7 +93,14 @@ class LLMConfig:
 
 
 class LLMProvider:
-    """所有后端实现的接口。``complete`` 失败**必须抛异常**，由调用方降级。"""
+    """所有后端实现的接口。``complete`` 失败**必须抛异常**，由调用方降级。
+
+    ★★ G2-L1（2026-11-20）：``complete`` 是**模板方法**——所有出网文本在这里
+    统一过一遍 ``scrub_identifiers``，再交给子类的 ``_send``。子类只能覆写
+    ``_send``，**不能覆写 ``complete``**，因此任何 provider（含将来新增的）都
+    无法绕过出网去标识。这比"每个 complete 各自记得调 scrub"可靠：后者漏一个
+    就是一次合规事故，而模板方法只有单点。
+    """
 
     name = "base"
 
@@ -100,6 +109,13 @@ class LLMProvider:
 
     def complete(self, prompt: str, *, system: str = SYSTEM_GUARD,
                  max_tokens: int = 400) -> str:
+        """出网唯一出口：先去标识，再发请求。子类不要覆写本方法。"""
+        return self._send(scrub_identifiers(prompt), system=system,
+                          max_tokens=max_tokens)
+
+    def _send(self, prompt: str, *, system: str = SYSTEM_GUARD,
+              max_tokens: int = 400) -> str:
+        """真正发请求的实现（收到的 prompt **已经**过脱敏）。子类覆写这里。"""
         raise NotImplementedError
 
 
@@ -114,8 +130,8 @@ class NullProvider(LLMProvider):
     def available(self) -> bool:
         return False
 
-    def complete(self, prompt: str, *, system: str = SYSTEM_GUARD,
-                 max_tokens: int = 400) -> str:
+    def _send(self, prompt: str, *, system: str = SYSTEM_GUARD,
+              max_tokens: int = 400) -> str:
         return ""
 
 
@@ -137,8 +153,8 @@ class OllamaProvider(LLMProvider):
         except Exception:
             return False
 
-    def complete(self, prompt: str, *, system: str = SYSTEM_GUARD,
-                 max_tokens: int = 400) -> str:
+    def _send(self, prompt: str, *, system: str = SYSTEM_GUARD,
+              max_tokens: int = 400) -> str:
         body = json.dumps({
             "model": self.model, "prompt": prompt, "system": system,
             "stream": False,
@@ -156,8 +172,10 @@ class OllamaProvider(LLMProvider):
 class OpenAICompatProvider(LLMProvider):
     """任意 OpenAI 兼容 API（DeepSeek / 通义 / vLLM / one-api 网关…）。
 
-    ⚠️ 互联网产品用云端 API 时：**患者数据出网前必须去标识化**
-    （见 ``domain.scrub_identifiers``）。这条不是建议，是合规要求。
+    ★★ G2（2026-11-20）：出网去标识由基类 :meth:`LLMProvider.complete` 的模板方法
+    统一完成（L1，见 ``domain.scrub_identifiers``）—— 患者数据不会以原文出网。
+    本类再加一道 L4 硬闸：脱敏后若**仍**命中敏感模式，直接抛异常拒发（fail closed），
+    不把可能漏网的标识发给第三方。两条都是合规要求，不是建议。
     """
 
     name = "openai"
@@ -170,8 +188,14 @@ class OpenAICompatProvider(LLMProvider):
     def available(self) -> bool:
         return bool(self.cfg.api_key and self.url)
 
-    def complete(self, prompt: str, *, system: str = SYSTEM_GUARD,
-                 max_tokens: int = 400) -> str:
+    def _send(self, prompt: str, *, system: str = SYSTEM_GUARD,
+              max_tokens: int = 400) -> str:
+        # L4 硬闸：prompt 已由基类 complete() 脱敏；这里再扫一遍，
+        # 若仍命中说明脱敏被绕过或模式不全 → 拒发（fail closed），绝不静默放行。
+        if contains_identifiers(prompt):
+            raise RuntimeError(
+                "出网去标识失败：prompt 仍含直接标识，已拒绝发送（G2-L4 fail closed）。"
+                "请检查 domain._SENSITIVE_PATTERNS 是否被改动。")
         body = json.dumps({
             "model": self.model,
             "messages": [{"role": "system", "content": system},
@@ -425,8 +449,8 @@ class _FakeProvider(LLMProvider):
     def available(self) -> bool:
         return True
 
-    def complete(self, prompt: str, *, system: str = SYSTEM_GUARD,
-                 max_tokens: int = 400) -> str:
+    def _send(self, prompt: str, *, system: str = SYSTEM_GUARD,
+              max_tokens: int = 400) -> str:
         self.calls += 1
         if self.boom:
             raise RuntimeError("模拟模型不可用")
@@ -488,6 +512,68 @@ def selftest() -> bool:
     d = LLMConfig(provider="openai", api_key="sk-abcdef123456").to_dict()
     check("★ 后台展示时 api_key 打码（不回显密钥）",
           d["api_key"] and "sk-abcdef123456" not in d["api_key"], str(d))
+
+    # ---- ★★ G2 出网去标识（2026-11-20）。三条出网路径都必须经模板方法脱敏。
+    #      用"捕获型 provider"记下 _send 真正收到的 prompt（此时已经过基类脱敏）。
+    PHONE = "13812345678"
+    IDNO = "11010119900307123X"
+
+    class _CaptureProvider(LLMProvider):
+        name = "capture"
+
+        def __init__(self):
+            self.prompts = []
+
+        def available(self) -> bool:
+            return True
+
+        def _send(self, prompt, *, system=SYSTEM_GUARD, max_tokens=400):
+            self.prompts.append(prompt)
+            return ""       # 返回空 → 各路径走 fallback，但我们只关心 prompt
+
+    # 路径①：phrase_question 的 known（患者已提供信息）里藏手机号
+    cap1 = _CaptureProvider()
+    phrase_question(cap1, "你哪里不舒服？", {"手机号": PHONE, "主诉": "胸痛"})
+    check("★ G2 路径① phrase_question：出网 prompt 无原始手机号",
+          PHONE not in cap1.prompts[0] and "[已去标识]" in cap1.prompts[0],
+          cap1.prompts[0])
+
+    # 路径②：compose_summary_text 的结构化病史里藏身份证
+    cap2 = _CaptureProvider()
+    compose_summary_text(cap2, {"chief_complaint": "胸痛",
+                                "present_illness": {"证件号": IDNO}})
+    check("★ G2 路径② compose_summary_text：出网 prompt 无原始身份证",
+          IDNO not in cap2.prompts[0] and "[已去标识]" in cap2.prompts[0],
+          cap2.prompts[0])
+
+    # 路径③：compose_answer 的患者问题里藏手机号（资料原文不含标识）
+    cap3 = _CaptureProvider()
+    g2_src = [{"title": "发热家庭处理", "brief": "体温≥38.5℃可按说明书退热。", "kind": "doc"}]
+    compose_answer(cap3, "我的手机号是" + PHONE + "，这病怎么办", g2_src)
+    check("★ G2 路径③ compose_answer：出网 prompt 无原始手机号",
+          PHONE not in cap3.prompts[0] and "[已去标识]" in cap3.prompts[0],
+          cap3.prompts[0])
+
+    # ★★ 负对照：证明上面的断言非恒绿 —— 直接调 _send（绕过模板脱敏），
+    #    原始标识必须原样出现。若哪天有人把 complete 改成直通 _send，上三组会立刻红。
+    bypass = _CaptureProvider()
+    bypass._send("患者手机号 " + PHONE + " 证件 " + IDNO)
+    check("★ G2 负对照：绕过模板时原始标识确实进入 _send（断言非恒绿）",
+          PHONE in bypass.prompts[0] and IDNO in bypass.prompts[0])
+
+    # L4 硬闸：云端 provider 的 _send 收到残留标识必须拒发（fail closed）。
+    #    直接喂一个带原始标识的 prompt 给 OpenAICompatProvider._send（绕过基类脱敏
+    #    模拟"L1 被绕过"），必须在发 HTTP 前抛 RuntimeError。
+    cloud = OpenAICompatProvider(LLMConfig(provider="openai", api_key="sk-test"))
+    try:
+        cloud._send("患者手机号 " + PHONE)
+        l4_blocked = False
+    except RuntimeError as ex:
+        l4_blocked = "出网去标识失败" in str(ex)
+    check("★ G2-L4 云端硬闸：脱敏被绕过时拒发（fail closed）", l4_blocked)
+    # 脱敏后的 prompt 不应触发 L4 误报（能在不触网前先被 contains_identifiers 放行）
+    check("★ G2-L4 对已脱敏文本不误拦",
+          not contains_identifiers(scrub_identifiers("患者手机号 " + PHONE)))
 
     check("系统提示词钉死了三条禁止", "严禁" in SYSTEM_GUARD
           and "诊断" in SYSTEM_GUARD and "编造" in SYSTEM_GUARD)

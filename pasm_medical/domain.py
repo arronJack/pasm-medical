@@ -29,10 +29,15 @@ _SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
 #: 姓名等直接标识**不入库**：认知层只存去标识化后的引用。
 #: 真实姓名 / 身份证 / 手机号留在业务库（Spring Boot 侧），认知层拿不到也存不下。
+#:
+#: ★★ 2026-11-20 修真 bug：原用 ``\b`` 做边界，但 Python 的 ``\b`` 把中文也算 ``\w``，
+#: 于是「我的手机号是13812345678，…」里手机号前面是中文"是" → ``\b`` 不成立 →
+#: **中文句子里的手机号整段漏网**。改用「前后不是数字」的断言：既能在中文语境命中，
+#: 又不会把长数字串（如 18 位身份证）从中间截断误匹配。
 _SENSITIVE_PATTERNS = (
-    re.compile(r"\b1[3-9]\d{9}\b"),                       # 手机号
-    re.compile(r"\b\d{17}[\dXx]\b"),                      # 身份证
-    re.compile(r"\b\d{15}\b"),
+    re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),          # 手机号（中文语境也能命中）
+    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),          # 身份证 18 位
+    re.compile(r"(?<!\d)\d{15}(?!\d)"),                # 身份证 15 位
 )
 
 
@@ -72,6 +77,19 @@ def scrub_identifiers(text: str) -> str:
     for pat in _SENSITIVE_PATTERNS:
         out = pat.sub("[已去标识]", out)
     return out
+
+
+def contains_identifiers(text: str) -> bool:
+    """文本里**是否仍含**直接标识（手机号 / 身份证 / 15 位数字）。
+
+    与 :func:`scrub_identifiers` 共用 :data:`_SENSITIVE_PATTERNS`，用于出网侧的
+    L4 硬闸：脱敏之后再扫一遍，若仍命中说明脱敏这一步被绕过或改坏，fail closed 拒发。
+
+    ⚠️ 诚实边界：它只能发现 :data:`_SENSITIVE_PATTERNS` 覆盖得到的形态。
+    姓名、地址、病历号等（L2）**不在**这个函数的视野内 —— 别把它当完整 PII 检测。
+    """
+    out = text or ""
+    return any(pat.search(out) for pat in _SENSITIVE_PATTERNS)
 
 
 @dataclass
@@ -206,6 +224,18 @@ def selftest() -> bool:
     s = scrub_identifiers("患者张三，手机 13812345678，身份证 11010119900307123X")
     check("手机号被去标识", "13812345678" not in s, s)
     check("身份证被去标识", "11010119900307123X" not in s, s)
+    # ★★ 回归：中文句子里的标识（原 \b 边界漏网 bug，2026-11-20）
+    zh = scrub_identifiers("我的手机号是13812345678，证件11010119900307123X，请看病")
+    check("★ 中文语境手机号被去标识（\\b 漏网 bug 回归）", "13812345678" not in zh, zh)
+    check("★ 中文语境身份证被去标识（\\b 漏网 bug 回归）", "11010119900307123X" not in zh, zh)
+    # contains_identifiers：L4 硬闸的判据，必须正反都灵
+    check("contains_identifiers 检出手机号/身份证",
+          contains_identifiers("联系 13812345678") and
+          contains_identifiers("证件 11010119900307123X"))
+    check("contains_identifiers 对脱敏后文本返回 False（不误报）",
+          not contains_identifiers(scrub_identifiers("手机 13812345678")))
+    check("contains_identifiers 对普通病史不误报",
+          not contains_identifiers("主诉胸痛，血压152/94，无药物过敏"))
 
     # Encounter → 记忆
     enc = Encounter(encounter_id="e1", patient_ref="p1", department="心内科",

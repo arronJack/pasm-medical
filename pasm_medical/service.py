@@ -764,7 +764,18 @@ class MedicalService:
         # 否则别名表一改这里就开始说谎）：识别得出非 Null 实现即算已知；
         # 显式写 "null" 也算已知（那是刻意的降级档，不是拼错）。
         requested = (cfg.provider or "null").lower()
-        out["provider_known"] = (build_provider(cfg).name != "null") or (requested == "null")
+        prov = build_provider(cfg)
+        out["provider_known"] = (prov.name != "null") or (requested == "null")
+        # ★ G2-L5：出网风险如实回显（只读、不探测）。云端 provider 的数据会离开本院，
+        #   界面/运维据此高亮提示；本地 ollama / null 不出网，明确标注"数据不出院"。
+        #   判据用 provider.name（取自 build_provider 本身），不另抄一份别名表。
+        out["egress"] = {
+            "cloud": prov.name == "openai",
+            "notice": ("出网风险：云端 LLM 已启用，患者文本将发往第三方 API；"
+                       "出网前已强制去标识（L1 模板方法）+ 脱敏后残留拒发（L4 硬闸）。"
+                       if prov.name == "openai" else
+                       "数据不出院：当前为本地模型（ollama）或无 LLM（null）。"),
+        }
         return out
 
     def health(self) -> Dict[str, Any]:
