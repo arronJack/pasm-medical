@@ -31,7 +31,7 @@ from . import store as session_store
 from .consult import ConsultEngine, ConsultSession
 from .lab import LabItem, LabReport, OcrEngine
 from .domain import (Encounter, agent_id_for, allergy_memory, critical_memory,
-                     scrub_identifiers)
+                     detect_identity_declaration, scrub_identifiers)
 from .learning import MedicalPosterior, ACTION_PREFIXES
 
 try:                                    # 相关性闸门（pasm-skills >= 0.6.2）
@@ -106,6 +106,35 @@ def _purge_medical_docs(kb: Any) -> int:
         return removed
     except Exception:                       # pragma: no cover
         return -1
+
+
+#: 身份声明类型的**中文名**（给前端提示文案用；内部分类仍用英文 key）。
+_IDENTITY_KIND_LABELS = {"name": "姓名", "address": "地址", "contact": "联系方式"}
+
+
+def _egress_notice(question: str) -> Dict[str, Any]:
+    """出网侧的**可见性**信息：患者是否在自由文本里自报了身份。
+
+    ★ 只做两件事：**检测**（``domain.detect_identity_declaration``）+ **给提示文案**。
+      **绝不改写原话** —— 改写会误伤临床语义：实测「我叫不上来哪里疼」按
+      "自称前缀+值"改写会变成「我叫[姓名]里疼」，把症状描述破坏掉。
+      医疗场景里误伤临床语义比漏掉一个地址更危险。
+
+    ★ 不返回原文片段的原因：审计/告警若存原文，审计表本身就是 PII 库。
+      只给"类型 + 次数"足够驱动前端提示与合规统计。
+
+    ★ 为什么放在返回体而不是 Python 侧落库：本仓铁律是"Java 只做鉴权/透传/留痕"，
+      Python 侧不另建审计存储。返回体带出去，由 Java/界面决定留痕与提示。
+    """
+    hints = detect_identity_declaration(question)
+    if not hints:
+        return {"identity_hints": [], "notice": ""}
+    kinds = "、".join(_IDENTITY_KIND_LABELS.get(h["kind"], h["kind"]) for h in hints)
+    return {
+        "identity_hints": hints,
+        "notice": ("检测到疑似身份信息（%s）。系统已识别您本人，"
+                   "提问无需填写姓名/住址；本次未改动您的原话。" % kinds),
+    }
 
 
 class MedicalService:
@@ -346,6 +375,9 @@ class MedicalService:
         got = self.recall(patient_ref, question, k=k)
         raw = list(got.get("hits") or []) + self.recall_docs(
             question, k=k, active_keys=doc_keys)
+        # ★ 出网可见性（2026-11-20）：患者是否在自由文本里自报身份。
+        #   纯检测、**不改写原话**（理由见 _egress_notice）。两条 return 路径都要带。
+        egress = _egress_notice(question)
         if use_gate and relevance is None:
             # ★ 装了闸门却用不了 → **宁可拒答也不放行**。
             #   这里与"校验类逻辑无法判定就放行"的规则不同：那条规则防的是**误拦正确内容**；
@@ -355,6 +387,7 @@ class MedicalService:
                       "hits": [], "count": 0, "raw_count": len(raw),
                       "gate": False,
                       "refusal_reason": "相关性闸门不可用（pasm-skills 版本过低）"})
+            d["egress"] = egress
             return d
         if use_gate:
             keep = relevance.select_evidence(question, raw, limit=k)
@@ -382,6 +415,7 @@ class MedicalService:
                   "raw_count": len(raw), "gate": bool(use_gate),
                   # ★ 这段文字是模型说的还是模板拼的 —— 审计要能区分（责任不同）。
                   "answer_source": composed["source"]})
+        d["egress"] = egress
         return d
 
     def timeline(self, patient_ref: str, k: int = 20) -> List[Dict[str, Any]]:

@@ -175,6 +175,48 @@ def is_identifier_field(name: str) -> bool:
     return bool(_FIELD_LABEL_RE.search(name or ""))
 
 
+#: 疑似**身份声明**的锚点（"我叫…"/"我住在…"）。**只用于检测与告警，绝不用于改写文本。**
+#:
+#: ★★ 为什么只检测、不改写（2026-11-20 实测数据）
+#: --------------------------------------------------
+#: 「我叫不上来哪里疼」是患者描述症状的极常见说法。若按"自称前缀 + 值"去改写，
+#: 会变成「我叫[姓名]里疼」——**把临床症状描述破坏掉**。
+#: 实测 6 条反例里 4 条被误伤（"我叫不上来"、"疼得我叫唤"、"我住在医院附近方便复查"）。
+#:
+#: 医疗场景里，**误伤临床语义比漏掉一个地址更危险**：泄漏是合规风险，
+#: 而破坏症状描述直接影响诊疗判断。所以这条路只做"看见"，不做"抹掉"。
+_IDENTITY_DECLARATIONS = (
+    ("name", re.compile(r"(我叫作|我叫|本人叫|我的名字是|患者叫|病人叫)")),
+    ("address", re.compile(r"(我住在|我家住在|我家在|本人住|现居住于|本人现住)")),
+    ("contact", re.compile(r"(我的电话是|我的手机号是|我的联系方式是|电话联系我)")),
+)
+
+
+def detect_identity_declaration(text: str) -> List[Dict[str, Any]]:
+    """检测自由文本里的**疑似**身份声明，返回 ``[{"kind":..., "count":...}]``。
+
+    ★★ 两条刻意的设计约束：
+
+    1. **不返回命中的原文片段**。审计/告警若存了原文，审计表本身就变成 PII 库 ——
+       等于把泄漏从"出网"搬到"落库"。只记**类型 + 次数**足够驱动提示与统计，
+       且不新增任何敏感数据。
+    2. **不修改文本**。本函数是纯检测，调用方拿它做提示/留痕，
+       **绝不能**拿它去替换内容（原因见 ``_IDENTITY_DECLARATIONS`` 的实测注释）。
+
+    ⚠️ 诚实边界：这是**启发式**，必然有误报（"我叫不上来"会命中 name），
+    也必然有漏报（"张三，男，45岁"没有自称前缀）。
+    但它不承担拦截职责 —— 它的作用是让"患者自报身份"这件事**从静默变可见**，
+    从而驱动产品侧引导（"无需填写姓名/住址"）与后续评估是否要上 NER。
+    """
+    out = text or ""
+    hits: List[Dict[str, Any]] = []
+    for kind, pat in _IDENTITY_DECLARATIONS:
+        n = len(pat.findall(out))
+        if n:
+            hits.append({"kind": kind, "count": n})
+    return hits
+
+
 @dataclass
 class Observation:
     """一条观测（症状 / 体征 / 检验）。对应 FHIR Observation 的最小投影。"""
@@ -385,6 +427,32 @@ def selftest() -> bool:
           all(is_identifier_field(x) for x in ("姓名", "联系电话", "住址", "病历号")))
     check("★ L3 临床字段名不被误判（主诉/过敏史/用药史）",
           not any(is_identifier_field(x) for x in ("主诉", "过敏史", "用药史", "既往史")))
+
+    # ---- ★★ 疑似身份声明检测（2026-11-20）：只检测、不改写。
+    #      它的职责是让"患者自报身份"从静默变可见，从而驱动产品侧引导。
+    _hit_name = detect_identity_declaration("我叫张三，最近胸闷")
+    check("★ 检测：'我叫X' 被识别为姓名声明",
+          any(h["kind"] == "name" for h in _hit_name), str(_hit_name))
+    _hit_addr = detect_identity_declaration("我住在广东省深圳市南山区科技园1号")
+    check("★ 检测：'我住在X' 被识别为地址声明",
+          any(h["kind"] == "address" for h in _hit_addr), str(_hit_addr))
+    check("★ 检测：普通提问不产生告警（不误报临床问题）",
+          detect_identity_declaration("发烧三天了怎么办") == [])
+    check("★ 检测：临床描述不被误报（主诉/现病史）",
+          detect_identity_declaration("主诉：胸闷气短，活动后加重") == [])
+    # ★★★ 最关键的一条：检测结果**不得包含原文** ——
+    #     否则审计表本身就成了 PII 库，等于把泄漏从"出网"搬到"落库"。
+    _leak = detect_identity_declaration("我叫张三，住址是阳光工业区1号，电话13812345678")
+    check("★★ 检测结果不含原文（审计不会变成 PII 库）",
+          "张三" not in str(_leak) and "阳光工业区" not in str(_leak)
+          and "13812345678" not in str(_leak), str(_leak))
+    check("★ 检测：多条声明分别计数",
+          {h["kind"] for h in detect_identity_declaration(
+              "我叫张三，我住在南山区，我的电话是13812345678")} ==
+          {"name", "address", "contact"})
+    # 诚实边界：它**会**误命中（"我叫不上来"）——这正是只做检测、不做改写的根本原因
+    check("★ 已知误报被如实暴露（'我叫不上来'命中 name → 只告警不改写）",
+          any(h["kind"] == "name" for h in detect_identity_declaration("我叫不上来哪里疼")))
 
     # Encounter → 记忆
     enc = Encounter(encounter_id="e1", patient_ref="p1", department="心内科",
