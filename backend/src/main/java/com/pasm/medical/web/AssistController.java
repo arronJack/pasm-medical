@@ -108,6 +108,10 @@ public class AssistController {
         // 正文产出方（llm:<model> / fallback）—— 前端可展示"模板整理"还是"模型整理"，
         // 运维排查"为什么话术很生硬"时第一眼就能看出来。
         out.put("answerSource", answerSource);
+        // ★ 出网可见性提示（2026-11-20）：认知层 _egress_notice 只"检测不自报身份"
+        //   并给出提示文案，纯透传、不改写患者原话。此前 Python 已算好却没透传到前端
+        //   （L6 只做了一半），这里补上。egress = {identity_hints, notice}。
+        out.put("egress", cognition.toPlain(r.path("egress")));
         // 恒为 true —— 不要因为"看起来没风险"就放开
         out.put("requiresPhysicianConfirmation", true);
         out.put("disclaimer", "本结果由辅助系统基于既有资料生成，仅供医师参考，不构成诊断意见。");

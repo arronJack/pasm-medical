@@ -217,6 +217,8 @@ export const api = {
       refusalReason: string
       requiresPhysicianConfirmation: boolean
       disclaimer: string
+      /** 出网可见性：患者是否在自由文本里自报身份（纯检测，不改写原话）。 */
+      egress?: { identity_hints: { kind: string; count: number }[]; notice: string }
     }>('/assist/ask', { method: 'POST', body: JSON.stringify({ patientRef, question, k }) }),
 
   history: (patientRef: string) =>

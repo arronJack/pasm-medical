@@ -96,6 +96,9 @@
             <span v-if="m.refusalReason" class="refused-why">（判据：{{ m.refusalReason }}）</span>
           </div>
 
+          <!-- 出网可见性提示：患者自报了姓名/住址时提醒"无需填写"，不阻断、不改写原话 -->
+          <div v-if="m.egressNotice" class="egress-note">{{ m.egressNotice }}</div>
+
           <div v-if="m.disclaimer" class="disc">{{ m.disclaimer }}</div>
 
           <details v-if="m.evidence?.length" class="evidence">
@@ -233,6 +236,8 @@ interface Msg {
   refusalReason?: string
   /** 资料问答的免责声明（由后端下发，前端不硬编码措辞）。 */
   disclaimer?: string
+  /** 出网可见性提示：后端检测到自报身份时下发的文案（仅展示，不改写原话）。 */
+  egressNotice?: string
   resolved?: string
   /** 问题消息携带的 key —— 反馈时拼成 ask:<key> 写进医学动作后验（P0.5）。 */
   qkey?: string
@@ -542,6 +547,8 @@ async function askAI(): Promise<void> {
       refused: r.refused,
       refusalReason: r.refused ? (r.refusalReason || '') : '',
       disclaimer: r.refused ? '' : (r.disclaimer || ''),
+      // 出网可见性提示：后端只检测不改写，这里仅展示；无声明时 notice 为空则不渲染。
+      egressNotice: r.egress?.notice || '',
     })
   } catch (e) {
     messages.value.push({ role: 'assistant', text: '查资料失败：' + (e instanceof Error ? e.message : e) })
@@ -846,6 +853,8 @@ function rowClass(it: LabItem) {
 .refused { font-size: 12px; color: var(--danger-fg); margin-top: 4px; }
 .refused-why { color: var(--text-3, var(--text-2)); }
 .disc { font-size: 11px; color: var(--text-2); margin-top: 6px; line-height: 1.5; }
+.egress-note { font-size: 11px; color: var(--warn-fg, #9a6700); background: rgba(154,103,0,.08);
+  border-left: 2px solid var(--warn-fg, #9a6700); padding: 4px 8px; margin-top: 6px; border-radius: 3px; line-height: 1.5; }
 .evidence { margin-top: 6px; font-size: 12px; color: var(--text-2); }
 .evidence ul { margin: 4px 0 0 16px; padding: 0; }
 .actions { margin-top: 6px; display: flex; gap: 8px; }
