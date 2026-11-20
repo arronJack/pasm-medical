@@ -500,7 +500,7 @@ mvn -version          :: ★ 必须显示 Java version: 17.x
 ```bash
 # 安装依赖（基座 + 应用框架）
 # ★ pasm-framework 必须 >=0.5.3 —— 0.5.2 缺 register_route，装上会「启动即拒」
-pip install "pasm-skills>=0.6.4" "pasm-framework>=0.5.3"
+pip install "pasm-skills>=0.6.7" "pasm-framework>=0.5.3"
 pip install -e .
 ```
 
@@ -828,7 +828,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY pasm_medical ./pasm_medical
-RUN pip install --no-cache-dir "pasm-skills>=0.6.4" "pasm-framework>=0.5.3" -e .
+RUN pip install --no-cache-dir "pasm-skills>=0.6.7" "pasm-framework>=0.5.3" -e .
 ENV PASM_MEDICAL_LLM=null
 EXPOSE 8090
 CMD ["python", "-m", "pasm_medical.service", "--host", "0.0.0.0", "--port", "8090"]
@@ -881,13 +881,15 @@ cd web && npm run build
 ## 七、常见问题
 
 **Q：认知服务起来了，但 `/api/cog/*` 返回 503？**
-认知层没装上。`pip install -U "pasm-skills>=0.6.4"`。`/api/cog/capabilities` 会给出具体原因。
+认知层没装上。`pip install -U "pasm-skills>=0.6.7"`。`/api/cog/capabilities` 会给出具体原因。
 
 **Q：认知层装了，但患者的关键过敏史/禁忌没有被优先召回？**
 若环境里是 `pasm-skills` ≤0.6.5，`recall()` 的显著度恒为 1（关键事实护城河失效），
-需升级到 0.6.6：`pip install -U "pasm-skills>=0.6.6"`（0.6.6 还一并修复了遗忘曲线 ts、
-分类过滤 cat 的嵌套取值）。注意 `>=0.6.4` 对已装 0.6.4/0.6.5 的环境会被 pip 判为已满足
-而不升级，所以**必须显式写 0.6.6**。升级后 `/api/cog/capabilities` 与召回排序即恢复。
+且 0.6.6 在 V1 backend + 有记忆时**召回直接崩**（可读时间串 `float()` 抛异常，已发的坏版本）。
+请升级到 **0.6.7 及以上**：`pip install -U "pasm-skills>=0.6.7"`（0.6.7 修了 ts 类型容错 +
+写入侧归一；0.6.6 的显著度/时间/分类嵌套取值修复也包含在内）。注意 `>=0.6.4` 对已装
+0.6.4/0.6.5/0.6.6 的环境会被 pip 判为已满足而不升级，所以**必须显式写 0.6.7**。
+升级后 `/api/cog/capabilities` 与召回排序即恢复。
 
 **Q：前端调接口一直 401？**
 业务层没带管理令牌。认知接口**全部落在管理作用域**（默认行为），

@@ -86,7 +86,7 @@ PASM 的知识库与记忆**默认落点是全机共享**的（不给目录就�
 ```bash
 # 1) Python 认知服务（先装依赖）
 #    ★ pasm-framework 必须 >=0.5.3：0.5.2 没有 register_route，装上会「启动即拒」（见 docs/GUIDE.md §4.2）
-pip install "pasm-skills>=0.6.4" "pasm-framework>=0.5.3"
+pip install "pasm-skills>=0.6.7" "pasm-framework>=0.5.3"
 pip install -e .
 PASM_MEDICAL_TOKEN=<管理令牌> python -m pasm_medical.service --port 8090
 #    跨请求会话存储（进行中的问诊 / 待确认检验单）：
