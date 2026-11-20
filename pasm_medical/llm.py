@@ -68,6 +68,11 @@ EGRESS_MAX_FIELD_CHARS = 600
 #: 这里再兜一层 —— 万一闸门被绕过，也不至于把整个知识库送出去。
 EGRESS_MAX_SOURCES = 8
 
+#: 患者问题（自由文本）的出网长度上限。
+#: ★ 这不是"安全措施"，是**数据最小化**：超长自由文本对"说顺"没有贡献，
+#:   却会等比放大暴露面（自由文本里的地址/姓名本就不在 L2 视野内，见下面的边界说明）。
+EGRESS_MAX_QUESTION_CHARS = 500
+
 
 def _egress_view(sources: Optional[List[Dict[str, Any]]] = None,
                  ) -> List[Dict[str, Any]]:
@@ -416,6 +421,23 @@ def _parse_citations(text: str) -> tuple:
     return (text or "").strip(), []
 
 
+def _egress_question(question: Any) -> str:
+    """患者问题（自由文本）→ 可出网文本：脱敏 + 截断。
+
+    ⚠️ **诚实边界**：这条路只能脱敏**可识别的值形态**（手机号/身份证/座机/邮箱）
+    与**带标签的字段**（"住址：…"）。**自由文本里的地址/姓名脱不掉**
+    （"我住在广东省深圳市南山区…"、"我叫张三"）—— 中文地址/姓名没有稳定的
+    词形边界，裸匹配会误伤"广东省人民医院"这类机构名与临床词汇。
+    真正覆盖需要 NER 或"提问前先把患者信息结构化"。
+
+    截断是**数据最小化**：超长自由文本对"说顺"没有贡献，却等比放大暴露面。
+    """
+    out = scrub_identifiers(str(question or "")).strip()
+    if len(out) > EGRESS_MAX_QUESTION_CHARS:
+        out = out[:EGRESS_MAX_QUESTION_CHARS]
+    return out
+
+
 def compose_answer(provider: LLMProvider, question: str,
                    sources: Optional[List[Dict[str, Any]]] = None,
                    *, max_chars: int = 600) -> Dict[str, str]:
@@ -455,7 +477,7 @@ def compose_answer(provider: LLMProvider, question: str,
     prompt = ("患者的问题：%s\n\n"
               "可用资料（**只有这些**）：\n%s\n\n"
               "请依据上述资料作答，并在最后一行列出你实际用到的资料标题。"
-              % (scrub_identifiers(question), material))
+              % (_egress_question(question), material))
     try:
         got = provider.complete(prompt, system=ANSWER_SYSTEM, max_tokens=500)
     except Exception:
